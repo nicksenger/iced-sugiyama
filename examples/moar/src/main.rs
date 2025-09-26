@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use iced::application::Title;
-use iced::widget::{button, text, Container};
+use iced::widget::{Container, button, text};
 use iced_sugiyama::{Graph, Sugiyama};
 
 pub fn main() -> iced::Result {
@@ -91,6 +91,20 @@ impl Moarificator {
                 }))
                 .on_press(Message::Moar(n))
                 .into()
+            })
+            .edge_color(|i| {
+                let blue = match i % 9 {
+                    0 => iced::Color::from_rgb8(115, 147, 179),
+                    1 => iced::Color::from_rgb8(20, 52, 164),
+                    2 => iced::Color::from_rgb8(63, 0, 255),
+                    3 => iced::Color::from_rgb8(31, 81, 255),
+                    4 => iced::Color::from_rgb8(70, 130, 180),
+                    5 => iced::Color::from_rgb8(8, 143, 143),
+                    6 => iced::Color::from_rgb8(0, 163, 108),
+                    7 => iced::Color::from_rgb8(0, 128, 128),
+                    _ => iced::Color::from_rgb8(64, 181, 173),
+                };
+                (blue, blue.scale_alpha(0.5))
             })
             .padding(50),
         )

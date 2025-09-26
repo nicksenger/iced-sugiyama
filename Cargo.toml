@@ -3,8 +3,13 @@ name = "iced-sugiyama"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+animated = ["dep:lyon_algorithms"]
+
 [dependencies]
 iced.workspace = true
+lyon_algorithms = { workspace = true, optional = true }
 rust-sugiyama.workspace = true
 
 [workspace]
@@ -24,5 +29,6 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 iced = { version = "0.13", features = ["advanced", "canvas", "lazy"] }
+lyon_algorithms = "1"
 rust-sugiyama = "0.4"
 

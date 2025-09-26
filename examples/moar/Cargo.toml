@@ -1,0 +1,12 @@
+[package]
+name = "moar"
+description = "UI for getting moar"
+version = "0.1.0"
+authors = ["Nick Senger"]
+edition = "2024"
+publish = false
+
+[dependencies]
+fastrand = "2"
+iced.workspace = true
+iced-sugiyama = { path = "../.." }

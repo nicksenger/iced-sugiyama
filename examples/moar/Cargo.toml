@@ -6,6 +6,10 @@ authors = ["Nick Senger"]
 edition = "2024"
 publish = false
 
+[features]
+default = []
+animated = ["iced-sugiyama/animated"]
+
 [dependencies]
 fastrand = "2"
 iced.workspace = true

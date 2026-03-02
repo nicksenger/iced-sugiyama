@@ -129,6 +129,12 @@ impl Moarificator {
                 (blue, blue.scale_alpha(0.5))
             })
             .edge_label(|idx, (from, to)| Some(format!("{idx}: {from}->{to}")))
+            .node_size(|n| {
+                let label_len = if n == 0 { 4 } else { n.to_string().len() };
+                (label_len as f64 * 12.0 + 34.0, 34.0)
+            })
+            .edge_corner_radius(14.0)
+            .edge_endpoint_extension(10.0)
             .clusters(clusters)
             .cluster_color(|idx| match idx % 2 {
                 0 => iced::Color::from_rgba8(255, 112, 67, 0.9),

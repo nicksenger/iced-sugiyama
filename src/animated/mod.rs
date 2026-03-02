@@ -147,6 +147,8 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
     graph: Cow<'a, Graph>,
     view_node: Box<dyn Fn(u32) -> Element<'static, Message, Theme, Renderer> + 'a>,
     stroke_width: f32,
+    edge_corner_radius: f32,
+    edge_endpoint_extension: f32,
     edge_color: fn(usize) -> (Color, Color),
     edge_label: fn(usize, (u32, u32)) -> Option<String>,
     node_size: fn(u32) -> (f64, f64),
@@ -168,6 +170,8 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
             graph: graph.into(),
             view_node: Box::new(view_node),
             stroke_width: 2.0,
+            edge_corner_radius: 10.0,
+            edge_endpoint_extension: 8.0,
             edge_color: |_| (Color::BLACK, Color::BLACK.scale_alpha(0.5)),
             edge_label: |_, _| None,
             node_size: |_| (80.0, 40.0),
@@ -188,6 +192,16 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
 
     pub fn stroke_width(mut self, width: f32) -> Self {
         self.stroke_width = width;
+        self
+    }
+
+    pub fn edge_corner_radius(mut self, radius: f32) -> Self {
+        self.edge_corner_radius = radius.max(0.0);
+        self
+    }
+
+    pub fn edge_endpoint_extension(mut self, extension: f32) -> Self {
+        self.edge_endpoint_extension = extension.max(0.0);
         self
     }
 
@@ -309,6 +323,8 @@ where
                             old_sugiyama,
                             padding: self.padding,
                             stroke_width: self.stroke_width,
+                            edge_corner_radius: self.edge_corner_radius,
+                            edge_endpoint_extension: self.edge_endpoint_extension,
                             edge_color: self.edge_color,
                             cluster_color: self.cluster_color,
                             label_color: self.label_color,
@@ -351,6 +367,8 @@ where
     old_sugiyama: Option<GraphLayout>,
     padding: iced::Padding,
     stroke_width: f32,
+    edge_corner_radius: f32,
+    edge_endpoint_extension: f32,
     edge_color: fn(usize) -> (Color, Color),
     cluster_color: fn(usize) -> Color,
     label_color: fn(usize) -> Color,
@@ -428,6 +446,8 @@ where
                             draw_edge_with_label(
                                 frame,
                                 self.stroke_width,
+                                self.edge_corner_radius,
+                                self.edge_endpoint_extension,
                                 edge,
                                 &projected,
                                 from_color,
@@ -461,6 +481,8 @@ where
                             draw_edge_with_label(
                                 frame,
                                 self.stroke_width,
+                                self.edge_corner_radius,
+                                self.edge_endpoint_extension,
                                 edge,
                                 &projected,
                                 from_color,
@@ -558,6 +580,8 @@ where
                                 draw_edge_with_label(
                                     frame,
                                     self.stroke_width,
+                                    self.edge_corner_radius,
+                                    self.edge_endpoint_extension,
                                     edge,
                                     &points,
                                     from_color,
@@ -579,6 +603,8 @@ where
                                 draw_edge_with_label(
                                     frame,
                                     self.stroke_width,
+                                    self.edge_corner_radius,
+                                    self.edge_endpoint_extension,
                                     edge,
                                     &projected,
                                     from_color,
@@ -602,6 +628,8 @@ where
                             draw_edge_with_label(
                                 frame,
                                 self.stroke_width,
+                                self.edge_corner_radius,
+                                self.edge_endpoint_extension,
                                 edge,
                                 &projected,
                                 from_color,
@@ -636,6 +664,8 @@ where
                     draw_edge_with_label(
                         frame,
                         self.stroke_width,
+                        self.edge_corner_radius,
+                        self.edge_endpoint_extension,
                         edge,
                         &projected,
                         from_color,
@@ -887,6 +917,8 @@ fn draw_cluster_outline<Renderer>(
 fn draw_edge_with_label<Renderer>(
     frame: &mut canvas::Frame<Renderer>,
     stroke_width: f32,
+    corner_radius: f32,
+    endpoint_extension: f32,
     edge: &crate::layout_engine::EdgeLayout,
     points: &[Point],
     from_color: Color,
@@ -900,15 +932,11 @@ fn draw_edge_with_label<Renderer>(
     if points.len() < 2 {
         return;
     }
-    let start = points[0];
-    let end = points[points.len() - 1];
+    let adjusted = extend_polyline_endpoints(points, endpoint_extension);
+    let start = adjusted[0];
+    let end = adjusted[adjusted.len() - 1];
     frame.stroke(
-        &Path::new(|path| {
-            path.move_to(start);
-            for point in &points[1..] {
-                path.line_to(*point);
-            }
-        }),
+        &rounded_polyline_path(&adjusted, corner_radius),
         canvas::Stroke {
             width: stroke_width,
             style: canvas::stroke::Style::Gradient(canvas::Gradient::Linear(
@@ -932,6 +960,95 @@ fn draw_edge_with_label<Renderer>(
             ..canvas::Text::default()
         });
     }
+}
+
+fn rounded_polyline_path(points: &[Point], radius: f32) -> Path {
+    Path::new(|path| {
+        if points.is_empty() {
+            return;
+        }
+        if points.len() == 1 {
+            path.move_to(points[0]);
+            return;
+        }
+
+        path.move_to(points[0]);
+        if radius <= f32::EPSILON || points.len() == 2 {
+            for point in &points[1..] {
+                path.line_to(*point);
+            }
+            return;
+        }
+
+        for i in 1..points.len() - 1 {
+            let prev = points[i - 1];
+            let current = points[i];
+            let next = points[i + 1];
+
+            let in_vec = Vector::new(prev.x - current.x, prev.y - current.y);
+            let out_vec = Vector::new(next.x - current.x, next.y - current.y);
+            let in_len = (in_vec.x * in_vec.x + in_vec.y * in_vec.y).sqrt();
+            let out_len = (out_vec.x * out_vec.x + out_vec.y * out_vec.y).sqrt();
+
+            if in_len <= f32::EPSILON || out_len <= f32::EPSILON {
+                path.line_to(current);
+                continue;
+            }
+
+            let corner = radius.min(in_len * 0.5).min(out_len * 0.5);
+            let in_norm = Vector::new(in_vec.x / in_len, in_vec.y / in_len);
+            let out_norm = Vector::new(out_vec.x / out_len, out_vec.y / out_len);
+
+            let start = Point::new(
+                current.x + in_norm.x * corner,
+                current.y + in_norm.y * corner,
+            );
+            let end = Point::new(
+                current.x + out_norm.x * corner,
+                current.y + out_norm.y * corner,
+            );
+
+            path.line_to(start);
+            path.quadratic_curve_to(current, end);
+        }
+
+        path.line_to(*points.last().unwrap_or(&points[0]));
+    })
+}
+
+fn extend_polyline_endpoints(points: &[Point], extension: f32) -> Vec<Point> {
+    if points.len() < 2 || extension <= f32::EPSILON {
+        return points.to_vec();
+    }
+
+    let mut adjusted = points.to_vec();
+
+    let first = adjusted[0];
+    let second = adjusted[1];
+    let first_vec = Vector::new(second.x - first.x, second.y - first.y);
+    let first_len = (first_vec.x * first_vec.x + first_vec.y * first_vec.y).sqrt();
+    if first_len > f32::EPSILON {
+        let first_norm = Vector::new(first_vec.x / first_len, first_vec.y / first_len);
+        adjusted[0] = Point::new(
+            first.x - first_norm.x * extension,
+            first.y - first_norm.y * extension,
+        );
+    }
+
+    let last_index = adjusted.len() - 1;
+    let last = adjusted[last_index];
+    let penultimate = adjusted[last_index - 1];
+    let last_vec = Vector::new(last.x - penultimate.x, last.y - penultimate.y);
+    let last_len = (last_vec.x * last_vec.x + last_vec.y * last_vec.y).sqrt();
+    if last_len > f32::EPSILON {
+        let last_norm = Vector::new(last_vec.x / last_len, last_vec.y / last_len);
+        adjusted[last_index] = Point::new(
+            last.x + last_norm.x * extension,
+            last.y + last_norm.y * extension,
+        );
+    }
+
+    adjusted
 }
 
 fn interpolate_polylines(from: &[Point], to: &[Point], t: f32) -> Vec<Point> {

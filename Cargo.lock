@@ -1418,6 +1418,7 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "lyon_algorithms",
+ "petgraph",
  "rust-sugiyama",
 ]
 
@@ -2719,8 +2720,6 @@ dependencies = [
 [[package]]
 name = "rust-sugiyama"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a81a3e22e7b3e9218ae4d1a3640a7e7ad142e120acd03e5e66d231d5861598b1"
 dependencies = [
  "log",
  "petgraph",

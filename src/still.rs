@@ -257,19 +257,11 @@ where
                 ..canvas::Stroke::default()
             };
 
-            let (max_x, max_y) = (self.sugiyama.max_x, self.sugiyama.max_y);
+            let offset = layout_offset(&self.sugiyama, size);
             let project = |x: f64, y: f64| {
                 Point::new(
-                    if max_x <= 0.0 {
-                        0.5 * size.width
-                    } else {
-                        (x as f32 / max_x as f32) * size.width
-                    } + self.padding.left,
-                    if max_y <= 0.0 {
-                        0.5 * size.height
-                    } else {
-                        (y as f32 / max_y as f32) * size.height
-                    } + self.padding.top,
+                    x as f32 + offset.x + self.padding.left,
+                    y as f32 + offset.y + self.padding.top,
                 )
             };
 
@@ -502,18 +494,22 @@ where
 }
 
 fn child_positions(sugiyama: &GraphLayout, size: iced::Size) -> Vec<Vector> {
+    let offset = layout_offset(sugiyama, size);
     sugiyama
         .coords
         .values()
         .map(|(x, y)| Vector {
-            x: if sugiyama.max_x == 0. {
-                0.5
-            } else {
-                *x as f32 / sugiyama.max_x as f32
-            } * size.width,
-            y: (*y as f32 / sugiyama.max_y as f32) * size.height,
+            x: *x as f32 + offset.x,
+            y: *y as f32 + offset.y,
         })
         .collect()
+}
+
+fn layout_offset(sugiyama: &GraphLayout, size: iced::Size) -> Vector {
+    Vector {
+        x: ((size.width - sugiyama.max_x as f32).max(0.0)) * 0.5,
+        y: ((size.height - sugiyama.max_y as f32).max(0.0)) * 0.5,
+    }
 }
 
 fn rounded_polyline_path(points: &[Point], radius: f32) -> Path {

@@ -399,17 +399,10 @@ where
 
         let graph = self.cache.draw(renderer, bounds.size(), |frame| {
             let project = |layout: &GraphLayout, x: f64, y: f64| {
+                let offset = layout_offset(layout, size);
                 Point::new(
-                    if layout.max_x <= 0.0 {
-                        0.5 * size.width
-                    } else {
-                        (x as f32 / layout.max_x as f32) * size.width
-                    } + self.padding.left,
-                    if layout.max_y <= 0.0 {
-                        0.5 * size.height
-                    } else {
-                        (y as f32 / layout.max_y as f32) * size.height
-                    } + self.padding.top,
+                    x as f32 + offset.x + self.padding.left,
+                    y as f32 + offset.y + self.padding.top,
                 )
             };
 
@@ -1117,6 +1110,13 @@ fn point_at_distance(points: &[Point], lengths: &[f32], mut distance: f32) -> Po
     *points.last().unwrap_or(&Point::ORIGIN)
 }
 
+fn layout_offset(sugiyama: &GraphLayout, size: iced::Size) -> Vector {
+    Vector {
+        x: (size.width - sugiyama.max_x as f32).max(0.0) * 0.5,
+        y: (size.height - sugiyama.max_y as f32).max(0.0) * 0.5,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn child_positions(
     sugiyama: &GraphLayout,
@@ -1132,20 +1132,21 @@ fn child_positions(
         let animation = animation.get();
 
         match &animation {
-            Animation::Pending => old_sugiyama
-                .coords
-                .values()
-                .map(|(x, y)| Vector {
-                    x: if sugiyama.max_x == 0. {
-                        0.5
-                    } else {
-                        *x as f32 / sugiyama.max_x as f32
-                    } * size.width,
-                    y: (*y as f32 / sugiyama.max_y as f32) * size.height,
-                })
-                .collect(),
+            Animation::Pending => {
+                let offset = layout_offset(old_sugiyama, size);
+                old_sugiyama
+                    .coords
+                    .values()
+                    .map(|(x, y)| Vector {
+                        x: *x as f32 + offset.x,
+                        y: *y as f32 + offset.y,
+                    })
+                    .collect()
+            }
             Animation::Active { .. } => {
-                let progress = animation.progress(motion_easing, motion_duration).unwrap() as f64;
+                let progress = animation
+                    .progress(motion_easing, motion_duration)
+                    .unwrap_or(1.0) as f64;
                 let (mut sug, lost, gained) = old_sugiyama.avg(sugiyama, progress);
 
                 let mut gained_sources = HashMap::new();
@@ -1192,42 +1193,35 @@ fn child_positions(
                     *to_y = from_y + (*to_y - from_y) * (1. - progress);
                 }
 
+                let offset = layout_offset(&sug, size);
                 sug.coords
                     .values()
                     .map(|(x, y)| Vector {
-                        x: if sug.max_x == 0. {
-                            0.5
-                        } else {
-                            *x as f32 / sug.max_x as f32
-                        } * size.width,
-                        y: (*y as f32 / sug.max_y as f32) * size.height,
+                        x: *x as f32 + offset.x,
+                        y: *y as f32 + offset.y,
                     })
                     .collect()
             }
-            Animation::Complete => sugiyama
-                .coords
-                .values()
-                .map(|(x, y)| Vector {
-                    x: if sugiyama.max_x == 0. {
-                        0.5
-                    } else {
-                        *x as f32 / sugiyama.max_x as f32
-                    } * size.width,
-                    y: (*y as f32 / sugiyama.max_y as f32) * size.height,
-                })
-                .collect(),
+            Animation::Complete => {
+                let offset = layout_offset(sugiyama, size);
+                sugiyama
+                    .coords
+                    .values()
+                    .map(|(x, y)| Vector {
+                        x: *x as f32 + offset.x,
+                        y: *y as f32 + offset.y,
+                    })
+                    .collect()
+            }
         }
     } else {
+        let offset = layout_offset(sugiyama, size);
         sugiyama
             .coords
             .values()
             .map(|(x, y)| Vector {
-                x: if sugiyama.max_x == 0. {
-                    0.5
-                } else {
-                    *x as f32 / sugiyama.max_x as f32
-                } * size.width,
-                y: (*y as f32 / sugiyama.max_y as f32) * size.height,
+                x: *x as f32 + offset.x,
+                y: *y as f32 + offset.y,
             })
             .collect()
     }

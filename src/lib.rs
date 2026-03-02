@@ -1,3 +1,5 @@
+mod layout_engine;
+
 #[cfg(feature = "animated")]
 mod animated;
 #[cfg(feature = "animated")]

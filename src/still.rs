@@ -3,7 +3,6 @@
 // that would be great!
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 
 use iced::advanced::widget::{Operation, Tree, Widget};
@@ -11,11 +10,8 @@ use iced::widget::canvas::{self, Path};
 use iced::widget::{Component, Lazy, Stack};
 use iced::{Color, Element, Length, Padding, Point, Size, Vector, event};
 
-struct GraphLayout {
-    max_x: f64,
-    max_y: f64,
-    coords: BTreeMap<usize, (f64, f64)>,
-}
+pub use crate::layout_engine::Cluster;
+use crate::layout_engine::{GraphLayout, compute_layout};
 
 #[derive(Clone)]
 pub struct Graph {
@@ -49,26 +45,6 @@ impl Graph {
     pub fn config(self, config: rust_sugiyama::configure::Config) -> Self {
         Self { config, ..self }
     }
-
-    fn sugiyama(&self) -> GraphLayout {
-        let (mut max_x, mut max_y) = (0f64, 1f64);
-        let mut coords = BTreeMap::new();
-        for (layers, _, _) in
-            rust_sugiyama::from_edges(&self.edges, &rust_sugiyama::configure::Config::default())
-        {
-            for (i, (x, y)) in layers {
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-                coords.insert(i, (x, y));
-            }
-        }
-
-        GraphLayout {
-            max_x,
-            max_y,
-            coords,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -83,6 +59,12 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
     view_node: Box<dyn Fn(u32) -> Element<'static, Message, Theme, Renderer> + 'a>,
     stroke_width: f32,
     edge_color: fn(usize) -> (Color, Color),
+    edge_label: fn(usize, (u32, u32)) -> Option<String>,
+    node_size: fn(u32) -> (f64, f64),
+    clusters: Vec<Cluster>,
+    render_config: rust_sugiyama::advanced::RenderConfig,
+    cluster_color: fn(usize) -> Color,
+    label_color: fn(usize) -> Color,
     padding: Padding,
 }
 
@@ -96,6 +78,12 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
             view_node: Box::new(view_node),
             stroke_width: 4.0,
             edge_color: |_| (Color::BLACK, Color::BLACK.scale_alpha(0.5)),
+            edge_label: |_, _| None,
+            node_size: |_| (80.0, 40.0),
+            clusters: Vec::new(),
+            render_config: Default::default(),
+            cluster_color: |_| Color::from_rgba8(90, 90, 90, 0.6),
+            label_color: |_| Color::BLACK,
             padding: iced::Padding::ZERO,
         }
     }
@@ -107,6 +95,36 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
 
     pub fn stroke_width(mut self, width: f32) -> Self {
         self.stroke_width = width;
+        self
+    }
+
+    pub fn edge_label(mut self, f: fn(usize, (u32, u32)) -> Option<String>) -> Self {
+        self.edge_label = f;
+        self
+    }
+
+    pub fn node_size(mut self, f: fn(u32) -> (f64, f64)) -> Self {
+        self.node_size = f;
+        self
+    }
+
+    pub fn clusters(mut self, clusters: Vec<Cluster>) -> Self {
+        self.clusters = clusters;
+        self
+    }
+
+    pub fn render_config(mut self, config: rust_sugiyama::advanced::RenderConfig) -> Self {
+        self.render_config = config;
+        self
+    }
+
+    pub fn cluster_color(mut self, f: fn(usize) -> Color) -> Self {
+        self.cluster_color = f;
+        self
+    }
+
+    pub fn label_color(mut self, f: fn(usize) -> Color) -> Self {
+        self.label_color = f;
         self
     }
 
@@ -135,38 +153,30 @@ where
                 .map(|n| (self.view_node)(*n).map(Event::Passthrough))
                 .collect();
 
-            let node_map = self
-                .graph
-                .nodes
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (*n, i))
-                .collect::<HashMap<_, _>>();
-
-            let sugiyama = if graph.nodes.len() == 1 {
-                GraphLayout {
-                    coords: [(0usize, (1., 1.))].into_iter().collect(),
-                    max_x: 0.,
-                    max_y: 1.,
-                }
-            } else {
-                graph.sugiyama()
-            };
+            let sugiyama = compute_layout(
+                &graph.nodes,
+                &graph.edges,
+                &graph.config,
+                self.node_size,
+                self.edge_label,
+                &self.clusters,
+                &self.render_config,
+            );
             let overlay = GraphNodes::<Event<Message>, Theme, Renderer> {
                 children,
-                sugiyama,
+                sugiyama: sugiyama.clone(),
                 padding: self.padding,
             };
 
             Stack::with_children(vec![
                 iced::widget::canvas(GraphCanvas::<Renderer> {
                     cache: Default::default(),
-                    sugiyama: graph.sugiyama(),
-                    node_map,
-                    edges: self.graph.edges.clone(),
+                    sugiyama,
                     padding: self.padding,
                     stroke_width: self.stroke_width,
                     edge_color: self.edge_color,
+                    cluster_color: self.cluster_color,
+                    label_color: self.label_color,
                 })
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -191,11 +201,11 @@ where
 {
     cache: canvas::Cache<Renderer>,
     sugiyama: GraphLayout,
-    node_map: HashMap<u32, usize>,
-    edges: Vec<(u32, u32)>,
     padding: iced::Padding,
     stroke_width: f32,
     edge_color: fn(usize) -> (Color, Color),
+    cluster_color: fn(usize) -> Color,
+    label_color: fn(usize) -> Color,
 }
 
 // Draw the edges (these will be in a layer under the nodes)
@@ -230,46 +240,78 @@ where
             };
 
             let (max_x, max_y) = (self.sugiyama.max_x, self.sugiyama.max_y);
-            for (idx, (from, to)) in self.edges.iter().enumerate() {
-                let Some((from_x, from_y)) = self
-                    .node_map
-                    .get(from)
-                    .and_then(|i| self.sugiyama.coords.get(i))
-                else {
-                    continue;
-                };
-                let Some((to_x, to_y)) = self
-                    .node_map
-                    .get(to)
-                    .and_then(|i| self.sugiyama.coords.get(i))
-                else {
-                    continue;
-                };
-
-                let a = Point::new(
-                    if max_x == 0. {
-                        0.5
+            let project = |x: f64, y: f64| {
+                Point::new(
+                    if max_x <= 0.0 {
+                        0.5 * size.width
                     } else {
-                        *from_x as f32 / max_x as f32
-                    } * size.width
-                        + self.padding.left,
-                    (*from_y as f32 / max_y as f32) * size.height + self.padding.top,
-                );
-                let b = Point::new(
-                    if max_x == 0. {
-                        0.5
+                        (x as f32 / max_x as f32) * size.width
+                    } + self.padding.left,
+                    if max_y <= 0.0 {
+                        0.5 * size.height
                     } else {
-                        *to_x as f32 / max_x as f32
-                    } * size.width
-                        + self.padding.left,
-                    (*to_y as f32 / max_y as f32) * size.height + self.padding.top,
-                );
+                        (y as f32 / max_y as f32) * size.height
+                    } + self.padding.top,
+                )
+            };
 
-                let (from_color, to_color) = (self.edge_color)(idx);
+            for cluster in &self.sugiyama.clusters {
+                let a = project(cluster.min_x, cluster.min_y);
+                let b = project(cluster.max_x, cluster.max_y);
+                let top_left = Point::new(a.x.min(b.x), a.y.min(b.y));
+                let rect_size = Size::new((a.x - b.x).abs().max(1.0), (a.y - b.y).abs().max(1.0));
                 frame.stroke(
-                    &Path::line(a, b),
-                    stroke_gradient((a, from_color), (b, to_color)),
+                    &Path::rectangle(top_left, rect_size),
+                    canvas::Stroke {
+                        width: self.stroke_width.max(1.0) * 0.5,
+                        style: canvas::stroke::Style::Solid((self.cluster_color)(cluster.index)),
+                        ..canvas::Stroke::default()
+                    },
                 );
+            }
+
+            for edge in &self.sugiyama.edges {
+                if edge.points.len() < 2 {
+                    continue;
+                }
+
+                let mut projected = edge
+                    .points
+                    .iter()
+                    .map(|(x, y)| project(*x, *y))
+                    .collect::<Vec<_>>();
+                let start = match projected.first().copied() {
+                    Some(point) => point,
+                    None => continue,
+                };
+                let end = match projected.last().copied() {
+                    Some(point) => point,
+                    None => continue,
+                };
+
+                let (from_color, to_color) = (self.edge_color)(edge.index);
+                frame.stroke(
+                    &Path::new(|path| {
+                        path.move_to(start);
+                        for point in projected.drain(1..) {
+                            path.line_to(point);
+                        }
+                    }),
+                    stroke_gradient((start, from_color), (end, to_color)),
+                );
+
+                if let (Some(label), Some((label_x, label_y))) = (&edge.label, edge.label_position)
+                {
+                    frame.fill_text(canvas::Text {
+                        content: label.clone(),
+                        position: project(label_x, label_y),
+                        color: (self.label_color)(edge.index),
+                        size: iced::Pixels(14.0),
+                        horizontal_alignment: iced::alignment::Horizontal::Center,
+                        vertical_alignment: iced::alignment::Vertical::Center,
+                        ..canvas::Text::default()
+                    });
+                }
             }
         });
         vec![graph]

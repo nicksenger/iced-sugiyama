@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use iced::application::Title;
 use iced::widget::{Container, button, text};
-use iced_sugiyama::{Graph, Sugiyama};
+use iced_sugiyama::{Cluster, Graph, Sugiyama};
 
 pub fn main() -> iced::Result {
     iced::application(
@@ -82,6 +82,28 @@ impl Moarificator {
     }
 
     fn view(&self) -> Container<'_, Message> {
+        let even_cluster_nodes = self
+            .0
+            .nodes
+            .iter()
+            .copied()
+            .filter(|node| *node != 0 && node % 2 == 0)
+            .collect::<Vec<_>>();
+        let odd_cluster_nodes = self
+            .0
+            .nodes
+            .iter()
+            .copied()
+            .filter(|node| *node % 2 == 1)
+            .collect::<Vec<_>>();
+        let mut clusters = Vec::new();
+        if even_cluster_nodes.len() > 1 {
+            clusters.push(Cluster::new(even_cluster_nodes).padding(14.0));
+        }
+        if odd_cluster_nodes.len() > 1 {
+            clusters.push(Cluster::new(odd_cluster_nodes).padding(14.0));
+        }
+
         Container::new(
             Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.0, |n| {
                 button(text(if n == 0 {
@@ -105,6 +127,12 @@ impl Moarificator {
                     _ => iced::Color::from_rgb8(64, 181, 173),
                 };
                 (blue, blue.scale_alpha(0.5))
+            })
+            .edge_label(|idx, (from, to)| Some(format!("{idx}: {from}->{to}")))
+            .clusters(clusters)
+            .cluster_color(|idx| match idx % 2 {
+                0 => iced::Color::from_rgba8(255, 112, 67, 0.9),
+                _ => iced::Color::from_rgba8(46, 125, 50, 0.9),
             })
             .padding(50),
         )

@@ -547,41 +547,35 @@ where
                                     .iter()
                                     .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                     .collect::<Vec<_>>();
-                                let points =
-                                    interpolate_polylines(&projected_old, &projected_new, progress);
-                                let label_position =
-                                    match (old_edge.label_position, edge.label_position) {
-                                        (Some((ox, oy)), Some((nx, ny))) => Some(Point::new(
-                                            lerp(
-                                                project(old_layout, ox, oy).x as f64,
-                                                project(&self.sugiyama, nx, ny).x as f64,
-                                                progress,
-                                            ) as f32,
-                                            lerp(
-                                                project(old_layout, ox, oy).y as f64,
-                                                project(&self.sugiyama, nx, ny).y as f64,
-                                                progress,
-                                            ) as f32,
-                                        )),
-                                        (None, Some((nx, ny))) => {
-                                            Some(project(&self.sugiyama, nx, ny))
-                                        }
-                                        (Some((ox, oy)), None) => Some(project(old_layout, ox, oy)),
-                                        (None, None) => None,
-                                    };
                                 let (from_color, to_color) = (self.edge_color)(edge.index);
                                 draw_edge_with_label(
                                     frame,
                                     self.stroke_width,
                                     self.edge_corner_radius,
                                     self.edge_endpoint_extension,
-                                    edge,
-                                    &points,
+                                    old_edge,
+                                    &projected_old,
                                     from_color,
                                     to_color,
                                     (self.label_color)(edge.index),
-                                    1.0,
-                                    label_position,
+                                    1.0 - progress,
+                                    old_edge
+                                        .label_position
+                                        .map(|(x, y)| project(old_layout, x, y)),
+                                );
+                                draw_edge_with_label(
+                                    frame,
+                                    self.stroke_width,
+                                    self.edge_corner_radius,
+                                    self.edge_endpoint_extension,
+                                    edge,
+                                    &projected_new,
+                                    from_color,
+                                    to_color,
+                                    (self.label_color)(edge.index),
+                                    progress,
+                                    edge.label_position
+                                        .map(|(x, y)| project(&self.sugiyama, x, y)),
                                 );
                             } else {
                                 let projected = edge
@@ -1042,72 +1036,6 @@ fn extend_polyline_endpoints(points: &[Point], extension: f32) -> Vec<Point> {
     }
 
     adjusted
-}
-
-fn interpolate_polylines(from: &[Point], to: &[Point], t: f32) -> Vec<Point> {
-    let samples = from.len().max(to.len()).max(2);
-    let from_resampled = resample_polyline(from, samples);
-    let to_resampled = resample_polyline(to, samples);
-
-    from_resampled
-        .into_iter()
-        .zip(to_resampled)
-        .map(|(a, b)| Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
-        .collect()
-}
-
-fn resample_polyline(points: &[Point], samples: usize) -> Vec<Point> {
-    if points.is_empty() {
-        return Vec::new();
-    }
-    if points.len() == 1 {
-        return vec![points[0]; samples];
-    }
-
-    let mut lengths = Vec::with_capacity(points.len().saturating_sub(1));
-    let mut total_length = 0.0f32;
-    for segment in points.windows(2) {
-        let dx = segment[1].x - segment[0].x;
-        let dy = segment[1].y - segment[0].y;
-        let length = (dx * dx + dy * dy).sqrt();
-        lengths.push(length);
-        total_length += length;
-    }
-
-    if total_length <= f32::EPSILON {
-        return vec![points[0]; samples];
-    }
-
-    let mut result = Vec::with_capacity(samples);
-    for sample in 0..samples {
-        let distance = if samples <= 1 {
-            0.0
-        } else {
-            total_length * sample as f32 / (samples as f32 - 1.0)
-        };
-        result.push(point_at_distance(points, &lengths, distance));
-    }
-    result
-}
-
-fn point_at_distance(points: &[Point], lengths: &[f32], mut distance: f32) -> Point {
-    for (index, length) in lengths.iter().enumerate() {
-        if distance <= *length || index + 1 == lengths.len() {
-            let start = points[index];
-            let end = points[index + 1];
-            let t = if *length <= f32::EPSILON {
-                0.0
-            } else {
-                (distance / *length).clamp(0.0, 1.0)
-            };
-            return Point::new(
-                start.x + (end.x - start.x) * t,
-                start.y + (end.y - start.y) * t,
-            );
-        }
-        distance -= *length;
-    }
-    *points.last().unwrap_or(&Point::ORIGIN)
 }
 
 fn layout_offset(sugiyama: &GraphLayout, size: iced::Size) -> Vector {

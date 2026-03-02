@@ -174,7 +174,7 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
             edge_endpoint_extension: 8.0,
             edge_color: |_| (Color::BLACK, Color::BLACK.scale_alpha(0.5)),
             edge_label: |_, _| None,
-            node_size: |_| (80.0, 40.0),
+            node_size: |_| (56.0, 32.0),
             clusters: Vec::new(),
             render_config: Default::default(),
             cluster_color: |_| Color::from_rgba8(90, 90, 90, 0.6),

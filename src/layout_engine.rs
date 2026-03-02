@@ -5,7 +5,7 @@ use rust_sugiyama::advanced::{
     ClusterSpec, DetailedLayout, RenderConfig, RoutedEdge, RoutedNode, from_graph_with_features,
 };
 
-const DEFAULT_NODE_SIZE: (f64, f64) = (80.0, 40.0);
+const DEFAULT_NODE_SIZE: (f64, f64) = (56.0, 32.0);
 const COMPONENT_GAP: f64 = 80.0;
 
 #[derive(Clone, Debug, PartialEq)]

@@ -131,7 +131,7 @@ impl Moarificator {
             .edge_label(|idx, (from, to)| Some(format!("{idx}: {from}->{to}")))
             .node_size(|n| {
                 let label_len = if n == 0 { 4 } else { n.to_string().len() };
-                (label_len as f64 * 12.0 + 34.0, 34.0)
+                (label_len as f64 * 8.0 + 28.0, 30.0)
             })
             .edge_corner_radius(14.0)
             .edge_endpoint_extension(10.0)

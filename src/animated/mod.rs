@@ -24,6 +24,7 @@ pub use switch::Switch;
 
 const FRAME_RATE_HZ: u64 = 60;
 const FRAME_DURATION: Duration = Duration::from_millis(1000 / FRAME_RATE_HZ);
+const EDGE_FINAL_SETTLE_START: f32 = 0.82;
 
 #[derive(Default, Clone)]
 pub struct SharedAnimation(Rc<RefCell<Animation>>);
@@ -552,7 +553,7 @@ where
                                     &projected_new,
                                     progress,
                                 );
-                                let label_position =
+                                let interpolated_label_position =
                                     match (old_edge.label_position, edge.label_position) {
                                         (Some((ox, oy)), Some((nx, ny))) => Some(Point::new(
                                             lerp(
@@ -572,6 +573,12 @@ where
                                         (Some((ox, oy)), None) => Some(project(old_layout, ox, oy)),
                                         (None, None) => None,
                                     };
+                                let final_label_position = edge
+                                    .label_position
+                                    .map(|(x, y)| project(&self.sugiyama, x, y));
+                                let settle = ((progress - EDGE_FINAL_SETTLE_START)
+                                    / (1.0 - EDGE_FINAL_SETTLE_START))
+                                    .clamp(0.0, 1.0);
                                 let (from_color, to_color) = (self.edge_color)(edge.index);
                                 draw_edge_with_label(
                                     frame,
@@ -583,9 +590,24 @@ where
                                     from_color,
                                     to_color,
                                     (self.label_color)(edge.index),
-                                    1.0,
-                                    label_position,
+                                    1.0 - settle,
+                                    interpolated_label_position,
                                 );
+                                if settle > 0.0 {
+                                    draw_edge_with_label(
+                                        frame,
+                                        self.stroke_width,
+                                        self.edge_corner_radius,
+                                        self.edge_endpoint_extension,
+                                        edge,
+                                        &projected_new,
+                                        from_color,
+                                        to_color,
+                                        (self.label_color)(edge.index),
+                                        settle,
+                                        final_label_position,
+                                    );
+                                }
                             } else {
                                 let projected = edge
                                     .points
@@ -1084,7 +1106,9 @@ fn interpolate_orthogonal_polylines(from: &[Point], to: &[Point], t: f32) -> Vec
         let from_dy = (from_resampled[i + 1].y - from_resampled[i].y).abs();
         let to_dx = (to_resampled[i + 1].x - to_resampled[i].x).abs();
         let to_dy = (to_resampled[i + 1].y - to_resampled[i].y).abs();
-        let horizontal_first = from_dx + to_dx >= from_dy + to_dy;
+        let horizontal_score = from_dx * (1.0 - t) + to_dx * t;
+        let vertical_score = from_dy * (1.0 - t) + to_dy * t;
+        let horizontal_first = horizontal_score >= vertical_score;
 
         let corner = if horizontal_first {
             Point::new(target.x, current.y)

@@ -38,7 +38,7 @@ impl SharedAnimation {
 }
 impl Hash for SharedAnimation {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.borrow().hash(state);
+        std::ptr::hash(Rc::as_ptr(&self.0), state);
     }
 }
 

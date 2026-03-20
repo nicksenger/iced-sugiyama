@@ -2720,6 +2720,7 @@ dependencies = [
 [[package]]
 name = "rust-sugiyama"
 version = "0.4.0"
+source = "git+https://github.com/nicksenger/rust-sugiyama.git?branch=paramecia#81485c5eef2f88475000c8fb5d07b577ba316a31"
 dependencies = [
  "log",
  "petgraph",

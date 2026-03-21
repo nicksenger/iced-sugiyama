@@ -62,6 +62,7 @@ impl Cluster {
 pub(crate) struct EdgeLayout {
     pub index: usize,
     pub points: Vec<(f64, f64)>,
+    pub curve_points: Vec<(f64, f64)>,
     pub label: Option<String>,
     pub label_position: Option<(f64, f64)>,
 }
@@ -313,6 +314,11 @@ fn merge_edge(
         index: *graph.edge_weight(edge.id).unwrap_or(&edge.id.index()),
         points: edge
             .points
+            .into_iter()
+            .map(|(x, y)| (x + x_offset, y))
+            .collect(),
+        curve_points: edge
+            .curve_points
             .into_iter()
             .map(|(x, y)| (x + x_offset, y))
             .collect(),

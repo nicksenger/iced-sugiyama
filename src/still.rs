@@ -540,6 +540,11 @@ where
                     .iter()
                     .map(|(x, y)| project(*x, *y))
                     .collect::<Vec<_>>();
+                let projected_curve = edge
+                    .curve_points
+                    .iter()
+                    .map(|(x, y)| project(*x, *y))
+                    .collect::<Vec<_>>();
                 let adjusted = extend_polyline_endpoints(
                     &projected,
                     self.edge_endpoint_extension * width_scale,
@@ -559,7 +564,12 @@ where
                     to_color = to_override;
                 }
                 frame.stroke(
-                    &rounded_polyline_path(&adjusted, self.edge_corner_radius * width_scale),
+                    &edge_path(
+                        &adjusted,
+                        &projected_curve,
+                        self.edge_corner_radius * width_scale,
+                        self.edge_endpoint_extension * width_scale,
+                    ),
                     canvas::Stroke {
                         width: self.stroke_width * width_scale,
                         style: canvas::stroke::Style::Gradient(canvas::Gradient::Linear(
@@ -1289,6 +1299,43 @@ fn rounded_polyline_path(points: &[Point], radius: f32) -> Path {
         }
 
         path.line_to(*points.last().unwrap_or(&points[0]));
+    })
+}
+
+fn edge_path(
+    points: &[Point],
+    curve_points: &[Point],
+    radius: f32,
+    endpoint_extension: f32,
+) -> Path {
+    if endpoint_extension <= f32::EPSILON && bezier_curve_points_are_valid(curve_points) {
+        return bezier_curve_path(curve_points);
+    }
+
+    rounded_polyline_path(points, radius)
+}
+
+fn bezier_curve_points_are_valid(curve_points: &[Point]) -> bool {
+    curve_points.len() >= 4 && (curve_points.len() - 1) % 3 == 0
+}
+
+fn bezier_curve_path(curve_points: &[Point]) -> Path {
+    Path::new(|path| {
+        let Some(start) = curve_points.first().copied() else {
+            return;
+        };
+
+        path.move_to(start);
+
+        for chunk in curve_points[1..].chunks(3) {
+            match chunk {
+                [control_a, control_b, end] => {
+                    path.bezier_curve_to(*control_a, *control_b, *end);
+                }
+                [end] => path.line_to(*end),
+                _ => {}
+            }
+        }
     })
 }
 

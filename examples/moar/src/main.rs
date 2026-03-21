@@ -3,13 +3,14 @@ use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::application::Title;
-use iced::widget::{Column, Container, button, container, text};
+use iced::widget::{button, container, text, Column, Container};
 use iced::window;
 use iced::window::Screenshot;
-use iced::{Alignment, Background, Color, Element, Font, Length, Task, Theme, border};
+use iced::{border, Alignment, Background, Color, Element, Font, Length, Task, Theme};
 use iced_sugiyama::{Cluster, EdgeEndpoint, EdgeEndpointKind, Graph, Sugiyama};
 use thiserror::Error;
 
@@ -17,6 +18,9 @@ const GRAPH_FONT: Font = Font::with_name("Times New Roman");
 const NODE_BORDER_RADIUS: f32 = 16.0;
 const CLUSTER_BORDER_RADIUS: f32 = 18.0;
 const MIN_NODE_SIDE: f64 = 72.0;
+
+const WINDOW_WIDTH: f32 = 2600.0;
+const WINDOW_HEIGHT: f32 = 1600.0;
 
 pub fn main() -> iced::Result {
     let options = AppOptions::from_env();
@@ -27,6 +31,10 @@ pub fn main() -> iced::Result {
         Moarificator::view,
     )
     .theme(|_| iced::Theme::Light)
+    .window(window::Settings {
+        size: iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
+        ..Default::default()
+    })
     .run_with(move || {
         let task = if options.headless {
             Task::done(Message::RenderMergedPng)
@@ -226,8 +234,8 @@ impl Moarificator {
     fn view(&self) -> Container<'_, Message> {
         let clusters = build_clusters(&self.graph);
 
-        let graph = Container::new(
-            Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.graph, |n| {
+        let graph = Container::new({
+            let graph = Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.graph, |n| {
                 button(
                     container(text(node_label(n)).font(GRAPH_FONT))
                         .width(Length::Fill)
@@ -255,7 +263,7 @@ impl Moarificator {
                 Some(iced::widget::text(marker).size(14).font(GRAPH_FONT).into())
             })
             .node_size(node_size)
-            .edge_corner_radius(20.0)
+            .edge_corner_radius(8.0)
             .edge_endpoint_extension(0.0)
             .clusters(clusters)
             .cluster_container(|idx, cluster| {
@@ -279,8 +287,20 @@ impl Moarificator {
                 )
             })
             .cluster_color(|_| Color::TRANSPARENT)
-            .padding(50),
-        )
+            .padding(50);
+
+            #[cfg(feature = "animated")]
+            let graph = {
+                let animation_duration = if self.export_in_progress || self.headless {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(400)
+                };
+                graph.animation_duration(animation_duration)
+            };
+
+            graph
+        })
         .width(Length::Fill)
         .height(Length::Fill);
 
@@ -302,7 +322,7 @@ impl Moarificator {
 
         Container::new(
             Column::new()
-                .push(export_button)
+                //.push(export_button)
                 .push(graph)
                 .spacing(16)
                 .align_x(Alignment::Start)
@@ -375,16 +395,17 @@ fn graph_to_dot(graph: &Graph) -> String {
 }
 
 fn initial_graph() -> Graph {
+    let mut rng = fastrand::Rng::with_seed(0x5EED_5EED);
     let mut nodes = vec![0_u32];
     let mut edges = Vec::new();
 
     for to in 1_u32..=6 {
         let max_edges = usize::min(3, to as usize);
-        let edge_count = fastrand::usize(1..=max_edges);
+        let edge_count = rng.usize(1..=max_edges);
         let mut connected_from = HashSet::new();
 
         while connected_from.len() < edge_count {
-            let from = fastrand::u32(0..to);
+            let from = rng.u32(0..to);
             if connected_from.insert(from) {
                 edges.push((from, to));
             }

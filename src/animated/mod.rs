@@ -923,6 +923,11 @@ where
                                 .iter()
                                 .map(|(x, y)| project(old_layout, *x, *y))
                                 .collect::<Vec<_>>();
+                            let projected_curve = edge
+                                .curve_points
+                                .iter()
+                                .map(|(x, y)| project(old_layout, *x, *y))
+                                .collect::<Vec<_>>();
                             let label_position = edge_canvas_label_position(
                                 &self.edge_label_overlay_edges,
                                 edge.index,
@@ -938,6 +943,7 @@ where
                                 self.label_color,
                                 edge,
                                 &projected,
+                                &projected_curve,
                                 style_for_old(edge.index),
                                 1.0,
                                 label_position,
@@ -960,6 +966,11 @@ where
                                 .iter()
                                 .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                 .collect::<Vec<_>>();
+                            let projected_curve = edge
+                                .curve_points
+                                .iter()
+                                .map(|(x, y)| project(&self.sugiyama, *x, *y))
+                                .collect::<Vec<_>>();
                             let label_position = edge_canvas_label_position(
                                 &self.edge_label_overlay_edges,
                                 edge.index,
@@ -976,6 +987,7 @@ where
                                 self.label_color,
                                 edge,
                                 &projected,
+                                &projected_curve,
                                 style_for_current(edge.index),
                                 1.0,
                                 label_position,
@@ -1044,6 +1056,11 @@ where
                                     .iter()
                                     .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                     .collect::<Vec<_>>();
+                                let projected_new_curve = edge
+                                    .curve_points
+                                    .iter()
+                                    .map(|(x, y)| project(&self.sugiyama, *x, *y))
+                                    .collect::<Vec<_>>();
                                 let points = interpolate_orthogonal_polylines(
                                     &projected_old,
                                     &projected_new,
@@ -1092,6 +1109,7 @@ where
                                     self.label_color,
                                     edge,
                                     &points,
+                                    &[],
                                     style,
                                     1.0 - settle,
                                     interpolated_label_position,
@@ -1107,6 +1125,7 @@ where
                                         self.label_color,
                                         edge,
                                         &projected_new,
+                                        &projected_new_curve,
                                         style,
                                         settle,
                                         final_label_position,
@@ -1115,6 +1134,11 @@ where
                             } else {
                                 let projected = edge
                                     .points
+                                    .iter()
+                                    .map(|(x, y)| project(&self.sugiyama, *x, *y))
+                                    .collect::<Vec<_>>();
+                                let projected_curve = edge
+                                    .curve_points
                                     .iter()
                                     .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                     .collect::<Vec<_>>();
@@ -1134,6 +1158,7 @@ where
                                     self.label_color,
                                     edge,
                                     &projected,
+                                    &projected_curve,
                                     style_for_current(edge.index),
                                     progress,
                                     label_position,
@@ -1144,6 +1169,11 @@ where
                         for edge in old_edges.values() {
                             let projected = edge
                                 .points
+                                .iter()
+                                .map(|(x, y)| project(old_layout, *x, *y))
+                                .collect::<Vec<_>>();
+                            let projected_curve = edge
+                                .curve_points
                                 .iter()
                                 .map(|(x, y)| project(old_layout, *x, *y))
                                 .collect::<Vec<_>>();
@@ -1162,6 +1192,7 @@ where
                                 self.label_color,
                                 edge,
                                 &projected,
+                                &projected_curve,
                                 style_for_old(edge.index),
                                 1.0 - progress,
                                 label_position,
@@ -1185,6 +1216,11 @@ where
                         .iter()
                         .map(|(x, y)| project(&self.sugiyama, *x, *y))
                         .collect::<Vec<_>>();
+                    let projected_curve = edge
+                        .curve_points
+                        .iter()
+                        .map(|(x, y)| project(&self.sugiyama, *x, *y))
+                        .collect::<Vec<_>>();
                     let label_position = edge_canvas_label_position(
                         &self.edge_label_overlay_edges,
                         edge.index,
@@ -1201,6 +1237,7 @@ where
                         self.label_color,
                         edge,
                         &projected,
+                        &projected_curve,
                         style_for_current(edge.index),
                         1.0,
                         label_position,
@@ -1886,6 +1923,7 @@ fn draw_styled_edge<Renderer>(
     label_color: fn(usize) -> Color,
     edge: &crate::layout_engine::EdgeLayout,
     projected_points: &[Point],
+    projected_curve_points: &[Point],
     style: OutgoingEdgeStyle,
     base_alpha: f32,
     label_position: Option<Point>,
@@ -1924,6 +1962,7 @@ fn draw_styled_edge<Renderer>(
         endpoint_extension,
         edge,
         projected_points,
+        projected_curve_points,
         from_color,
         to_color,
         label_color(edge.index),
@@ -1940,6 +1979,7 @@ fn draw_edge_with_label<Renderer>(
     endpoint_extension: f32,
     edge: &crate::layout_engine::EdgeLayout,
     points: &[Point],
+    curve_points: &[Point],
     from_color: Color,
     to_color: Color,
     label_color: Color,
@@ -1956,7 +1996,7 @@ fn draw_edge_with_label<Renderer>(
     let start = adjusted[0];
     let end = adjusted[adjusted.len() - 1];
     frame.stroke(
-        &rounded_polyline_path(&adjusted, corner_radius),
+        &edge_path(&adjusted, curve_points, corner_radius, endpoint_extension),
         canvas::Stroke {
             width: stroke_width,
             style: canvas::stroke::Style::Gradient(canvas::Gradient::Linear(
@@ -2033,6 +2073,43 @@ fn rounded_polyline_path(points: &[Point], radius: f32) -> Path {
         }
 
         path.line_to(*points.last().unwrap_or(&points[0]));
+    })
+}
+
+fn edge_path(
+    points: &[Point],
+    curve_points: &[Point],
+    radius: f32,
+    endpoint_extension: f32,
+) -> Path {
+    if endpoint_extension <= f32::EPSILON && bezier_curve_points_are_valid(curve_points) {
+        return bezier_curve_path(curve_points);
+    }
+
+    rounded_polyline_path(points, radius)
+}
+
+fn bezier_curve_points_are_valid(curve_points: &[Point]) -> bool {
+    curve_points.len() >= 4 && (curve_points.len() - 1) % 3 == 0
+}
+
+fn bezier_curve_path(curve_points: &[Point]) -> Path {
+    Path::new(|path| {
+        let Some(start) = curve_points.first().copied() else {
+            return;
+        };
+
+        path.move_to(start);
+
+        for chunk in curve_points[1..].chunks(3) {
+            match chunk {
+                [control_a, control_b, end] => {
+                    path.bezier_curve_to(*control_a, *control_b, *end);
+                }
+                [end] => path.line_to(*end),
+                _ => {}
+            }
+        }
     })
 }
 

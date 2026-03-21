@@ -26,6 +26,7 @@ const MIN_NODE_SIDE: f64 = 72.0;
 const WINDOW_WIDTH: f32 = 500.0;
 const WINDOW_HEIGHT: f32 = 500.0;
 const DEFAULT_GRAPH_SEED: u64 = 0x5EED_5EED;
+const DEFAULT_GRAPH_NODE_COUNT: u32 = 6;
 
 #[derive(Debug, Clone, Copy)]
 enum GraphvizEndpointGlyphKind {
@@ -124,7 +125,10 @@ pub fn main() -> iced::Result {
     .run_with(move || {
         let task = Task::done(Message::AppStarted);
 
-        (Moarificator::new(options.headless, options.seed), task)
+        (
+            Moarificator::new(options.headless, options.seed, options.node_count),
+            task,
+        )
     })
 }
 
@@ -142,11 +146,11 @@ struct Moarificator {
     pending_iced_screenshot: Option<Screenshot>,
 }
 impl Moarificator {
-    fn new(headless: bool, seed: u64) -> Self {
+    fn new(headless: bool, seed: u64, node_count: u32) -> Self {
         Self {
             headless,
             export_in_progress: false,
-            graph: initial_graph(seed),
+            graph: initial_graph(seed, node_count),
             pending_graphviz_png: None,
             pending_iced_screenshot: None,
         }
@@ -157,12 +161,14 @@ impl Moarificator {
 struct AppOptions {
     headless: bool,
     seed: u64,
+    node_count: u32,
 }
 
 impl AppOptions {
     fn from_env() -> Self {
         let mut headless = false;
         let mut seed = DEFAULT_GRAPH_SEED;
+        let mut node_count = DEFAULT_GRAPH_NODE_COUNT;
         let mut args = env::args().skip(1);
 
         while let Some(arg) = args.next() {
@@ -177,11 +183,24 @@ impl AppOptions {
                 _ if arg.starts_with("--seed=") => {
                     seed = parse_seed_arg(&arg["--seed=".len()..]);
                 }
+                "--nodes" => {
+                    let raw_node_count = args
+                        .next()
+                        .unwrap_or_else(|| panic!("missing value for --nodes"));
+                    node_count = parse_node_count_arg(&raw_node_count);
+                }
+                _ if arg.starts_with("--nodes=") => {
+                    node_count = parse_node_count_arg(&arg["--nodes=".len()..]);
+                }
                 _ => {}
             }
         }
 
-        Self { headless, seed }
+        Self {
+            headless,
+            seed,
+            node_count,
+        }
     }
 }
 
@@ -194,6 +213,13 @@ fn parse_seed_arg(raw_seed: &str) -> u64 {
     raw_seed
         .parse()
         .unwrap_or_else(|_| panic!("invalid value for --seed: {raw_seed}"))
+}
+
+fn parse_node_count_arg(raw_node_count: &str) -> u32 {
+    raw_node_count
+        .parse::<u32>()
+        .unwrap_or_else(|_| panic!("invalid value for --nodes: {raw_node_count}"))
+        .max(1)
 }
 
 #[derive(Debug, Clone)]
@@ -535,12 +561,12 @@ fn graph_to_dot(graph: &Graph) -> String {
     dot
 }
 
-fn initial_graph(seed: u64) -> Graph {
+fn initial_graph(seed: u64, node_count: u32) -> Graph {
     let mut rng = fastrand::Rng::with_seed(seed);
     let mut nodes = vec![0_u32];
     let mut edges = Vec::new();
 
-    for to in 1_u32..=6 {
+    for to in 1_u32..node_count {
         let max_edges = usize::min(3, to as usize);
         let edge_count = rng.usize(1..=max_edges);
         let mut connected_from = HashSet::new();

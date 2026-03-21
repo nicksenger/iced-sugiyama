@@ -333,10 +333,45 @@ fn merge_edge(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cluster, compute_layout};
+    use std::collections::BTreeMap;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
 
-    fn initial_graph() -> (Vec<u32>, Vec<(u32, u32)>) {
-        let mut rng = fastrand::Rng::with_seed(0x5EED_5EED);
+    use serde_json::Value;
+
+    use super::{Cluster, compute_layout};
+    use rust_sugiyama::configure::RankingType;
+
+    const DEFAULT_GRAPH_SEED: u64 = 0x5EED_5EED;
+
+    #[derive(Debug)]
+    struct GraphvizNodeLayout {
+        center: (f64, f64),
+        size: (f64, f64),
+    }
+
+    #[derive(Debug)]
+    struct GraphvizEdgeLayout {
+        label: Option<String>,
+        label_position: Option<(f64, f64)>,
+        points: Vec<(f64, f64)>,
+    }
+
+    #[derive(Debug)]
+    struct GraphvizLayout {
+        nodes: BTreeMap<u32, GraphvizNodeLayout>,
+        edges: Vec<GraphvizEdgeLayout>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AxisRelation {
+        Before,
+        Same,
+        After,
+    }
+
+    fn initial_graph_with_seed(seed: u64) -> (Vec<u32>, Vec<(u32, u32)>) {
+        let mut rng = fastrand::Rng::with_seed(seed);
         let mut nodes = vec![0_u32];
         let mut edges = Vec::new();
 
@@ -356,6 +391,10 @@ mod tests {
         }
 
         (nodes, edges)
+    }
+
+    fn initial_graph() -> (Vec<u32>, Vec<(u32, u32)>) {
+        initial_graph_with_seed(DEFAULT_GRAPH_SEED)
     }
 
     fn build_clusters(nodes: &[u32]) -> Vec<Cluster> {
@@ -400,6 +439,16 @@ mod tests {
     }
 
     fn graph_to_dot(nodes: &[u32], edges: &[(u32, u32)], clusters: &[Cluster]) -> String {
+        fn test_node_size(node: u32) -> (f64, f64) {
+            let side = if node == 0 {
+                100.0
+            } else {
+                10.0 * f64::from(node)
+            }
+            .max(72.0);
+            (side, side)
+        }
+
         fn node_label(node: u32) -> String {
             if node == 0 {
                 "Moar".to_string()
@@ -452,7 +501,7 @@ mod tests {
 
         fn push_node_dot(dot: &mut String, indent: usize, node: u32) {
             let indent_str = "    ".repeat(indent);
-            let (width, height) = node_size(node);
+            let (width, height) = test_node_size(node);
             dot.push_str(&format!(
                 "{indent_str}{node} [label=\"{}\", width={:.6}, height={:.6}];\n",
                 dot_escape(&node_label(node)),
@@ -560,6 +609,401 @@ mod tests {
         dot
     }
 
+    fn graphviz_layout(nodes: &[u32], edges: &[(u32, u32)], clusters: &[Cluster]) -> GraphvizLayout {
+        let dot = graph_to_dot(nodes, edges, clusters);
+        let mut child = Command::new("dot")
+            .arg("-Tjson0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn dot");
+
+        child
+            .stdin
+            .as_mut()
+            .expect("dot stdin")
+            .write_all(dot.as_bytes())
+            .expect("write dot");
+
+        let output = child.wait_with_output().expect("wait for dot");
+        assert!(
+            output.status.success(),
+            "dot failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let json: Value = serde_json::from_slice(&output.stdout).expect("parse dot json");
+        let bb = json["bb"].as_str().expect("graph bb");
+        let graph_bounds = parse_bb(bb);
+
+        let mut graphviz_nodes = BTreeMap::new();
+        for object in json["objects"].as_array().expect("graph objects") {
+            let Some(name) = object["name"].as_str() else {
+                continue;
+            };
+            let Ok(node) = name.parse::<u32>() else {
+                continue;
+            };
+            let center = parse_point(object["pos"].as_str().expect("node pos"));
+            let width = object["width"]
+                .as_str()
+                .expect("node width")
+                .parse::<f64>()
+                .expect("width")
+                * 72.0;
+            let height = object["height"]
+                .as_str()
+                .expect("node height")
+                .parse::<f64>()
+                .expect("height")
+                * 72.0;
+            graphviz_nodes.insert(
+                node,
+                GraphvizNodeLayout {
+                    center: (center.0, graph_bounds.3 - center.1),
+                    size: (width, height),
+                },
+            );
+        }
+
+        let graphviz_edges = json["edges"]
+            .as_array()
+            .expect("graph edges")
+            .iter()
+            .map(|edge| GraphvizEdgeLayout {
+                label: edge["label"].as_str().map(str::to_string),
+                label_position: edge["lp"]
+                    .as_str()
+                    .map(parse_point)
+                    .map(|(x, y)| (x, graph_bounds.3 - y)),
+                points: edge["pos"]
+                    .as_str()
+                    .map(parse_edge_points)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(x, y)| (x, graph_bounds.3 - y))
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+
+        GraphvizLayout {
+            nodes: graphviz_nodes,
+            edges: graphviz_edges,
+        }
+    }
+
+    fn parse_point(value: &str) -> (f64, f64) {
+        let mut parts = value.split(',');
+        let x = parts
+            .next()
+            .expect("x")
+            .parse::<f64>()
+            .expect("parse x");
+        let y = parts
+            .next()
+            .expect("y")
+            .parse::<f64>()
+            .expect("parse y");
+        (x, y)
+    }
+
+    fn parse_bb(value: &str) -> (f64, f64, f64, f64) {
+        let mut parts = value.split(',');
+        let min_x = parts.next().expect("min_x").parse::<f64>().expect("min_x");
+        let min_y = parts.next().expect("min_y").parse::<f64>().expect("min_y");
+        let max_x = parts.next().expect("max_x").parse::<f64>().expect("max_x");
+        let max_y = parts.next().expect("max_y").parse::<f64>().expect("max_y");
+        (min_x, min_y, max_x, max_y)
+    }
+
+    fn parse_edge_points(value: &str) -> Vec<(f64, f64)> {
+        value
+            .split_whitespace()
+            .filter_map(|token| {
+                let trimmed = token
+                    .strip_prefix("s,")
+                    .or_else(|| token.strip_prefix("e,"))
+                    .unwrap_or(token);
+                if !trimmed.contains(',') {
+                    return None;
+                }
+                Some(parse_point(trimmed))
+            })
+            .collect()
+    }
+
+    fn axis_relation(a_center: f64, a_size: f64, b_center: f64, b_size: f64) -> AxisRelation {
+        let tolerance = ((a_size + b_size) * 0.5 * 0.35).max(1.0);
+        if a_center < b_center - tolerance {
+            AxisRelation::Before
+        } else if a_center > b_center + tolerance {
+            AxisRelation::After
+        } else {
+            AxisRelation::Same
+        }
+    }
+
+    fn seed_pairwise_relation_summary(seed: u64) -> (usize, usize, usize) {
+        seed_pairwise_relation_summary_for_ranking(seed, RankingType::MinimizeEdgeLength)
+    }
+
+    fn seed_pairwise_relation_summary_for_ranking(
+        seed: u64,
+        ranking_type: RankingType,
+    ) -> (usize, usize, usize) {
+        fn test_node_size(node: u32) -> (f64, f64) {
+            let side = if node == 0 {
+                100.0
+            } else {
+                10.0 * f64::from(node)
+            }
+            .max(72.0);
+            (side, side)
+        }
+
+        let (nodes, edges) = initial_graph_with_seed(seed);
+        let clusters = build_clusters(&nodes);
+        let our_layout = compute_layout(
+            &nodes,
+            &edges,
+            &rust_sugiyama::configure::Config {
+                vertex_spacing: 26.0,
+                ranking_type,
+                ..Default::default()
+            },
+            |node| {
+                let side = if node == 0 {
+                    100.0
+                } else {
+                    10.0 * f64::from(node)
+                }
+                .max(72.0);
+                (side, side)
+            },
+            |_, (from, to)| Some(format!("{from} -> {to}")),
+            &clusters,
+            &rust_sugiyama::advanced::RenderConfig {
+                routing_padding: 4.0,
+                bend_penalty: 6.0,
+                cluster_padding: 10.0,
+                cluster_constraint_iterations: 4,
+                cluster_boundary_gap: 8.0,
+            },
+        );
+        let graphviz = graphviz_layout(&nodes, &edges, &clusters);
+
+        let mut vertical_mismatches = 0usize;
+        let mut horizontal_mismatches = 0usize;
+        let mut same_rank_pairs = 0usize;
+
+        for (index, &left_node) in nodes.iter().enumerate() {
+            for &right_node in nodes.iter().skip(index + 1) {
+                let left_graphviz = graphviz.nodes.get(&left_node).expect("graphviz left");
+                let right_graphviz = graphviz.nodes.get(&right_node).expect("graphviz right");
+                let left_ours = our_layout.coords.get(&(left_node as usize)).expect("our left");
+                let right_ours = our_layout.coords.get(&(right_node as usize)).expect("our right");
+                let left_our_size = test_node_size(left_node);
+                let right_our_size = test_node_size(right_node);
+
+                let graphviz_vertical = axis_relation(
+                    left_graphviz.center.1,
+                    left_graphviz.size.1,
+                    right_graphviz.center.1,
+                    right_graphviz.size.1,
+                );
+                let our_vertical = axis_relation(
+                    left_ours.1,
+                    left_our_size.1,
+                    right_ours.1,
+                    right_our_size.1,
+                );
+                if graphviz_vertical != our_vertical {
+                    vertical_mismatches += 1;
+                }
+
+                if graphviz_vertical == AxisRelation::Same {
+                    same_rank_pairs += 1;
+                    let graphviz_horizontal = axis_relation(
+                        left_graphviz.center.0,
+                        left_graphviz.size.0,
+                        right_graphviz.center.0,
+                        right_graphviz.size.0,
+                    );
+                    let our_horizontal = axis_relation(
+                        left_ours.0,
+                        left_our_size.0,
+                        right_ours.0,
+                        right_our_size.0,
+                    );
+                    if graphviz_horizontal != our_horizontal {
+                        horizontal_mismatches += 1;
+                    }
+                }
+            }
+        }
+
+        (vertical_mismatches, horizontal_mismatches, same_rank_pairs)
+    }
+
+    #[test]
+    fn dump_moar_seed_pairwise_comparison() {
+        for seed in [DEFAULT_GRAPH_SEED, 123, 456, 789] {
+            let (vertical_mismatches, horizontal_mismatches, same_rank_pairs) =
+                seed_pairwise_relation_summary(seed);
+            eprintln!(
+                "seed={seed} vertical_mismatches={vertical_mismatches} same_rank_horizontal_mismatches={horizontal_mismatches}/{same_rank_pairs}"
+            );
+        }
+    }
+
+    #[test]
+    fn dump_moar_seed_positions() {
+        for seed in [123, 789] {
+            let (nodes, edges) = initial_graph_with_seed(seed);
+            let clusters = build_clusters(&nodes);
+            let our_layout = compute_layout(
+                &nodes,
+                &edges,
+                &rust_sugiyama::configure::Config {
+                    vertex_spacing: 26.0,
+                    ..Default::default()
+                },
+                |node| {
+                    let side = if node == 0 {
+                        100.0
+                    } else {
+                        10.0 * f64::from(node)
+                    }
+                    .max(72.0);
+                    (side, side)
+                },
+                |_, (from, to)| Some(format!("{from} -> {to}")),
+                &clusters,
+                &rust_sugiyama::advanced::RenderConfig {
+                    routing_padding: 4.0,
+                    bend_penalty: 6.0,
+                    cluster_padding: 10.0,
+                    cluster_constraint_iterations: 4,
+                    cluster_boundary_gap: 8.0,
+                },
+            );
+            let graphviz = graphviz_layout(&nodes, &edges, &clusters);
+
+            eprintln!("seed={seed} edges={edges:?}");
+            for node in &nodes {
+                let graphviz_node = graphviz.nodes.get(node).expect("graphviz node");
+                let our_node = our_layout.coords.get(&(*node as usize)).expect("our node");
+                eprintln!(
+                    "node {node}: graphviz=({:.1}, {:.1}) ours=({:.1}, {:.1})",
+                    graphviz_node.center.0, graphviz_node.center.1, our_node.0, our_node.1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dump_moar_ranking_type_comparison() {
+        for ranking_type in [
+            RankingType::Original,
+            RankingType::MinimizeEdgeLength,
+            RankingType::Up,
+            RankingType::Down,
+        ] {
+            eprintln!("ranking_type={ranking_type:?}");
+            for seed in [DEFAULT_GRAPH_SEED, 123, 456, 789] {
+                let (vertical_mismatches, horizontal_mismatches, same_rank_pairs) =
+                    seed_pairwise_relation_summary_for_ranking(seed, ranking_type);
+                eprintln!(
+                    "  seed={seed} vertical_mismatches={vertical_mismatches} same_rank_horizontal_mismatches={horizontal_mismatches}/{same_rank_pairs}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dump_moar_seed_pair_mismatches() {
+        for seed in [DEFAULT_GRAPH_SEED, 123, 456, 789] {
+            let (nodes, edges) = initial_graph_with_seed(seed);
+            let clusters = build_clusters(&nodes);
+            let our_layout = compute_layout(
+                &nodes,
+                &edges,
+                &rust_sugiyama::configure::Config {
+                    vertex_spacing: 26.0,
+                    ..Default::default()
+                },
+                |node| {
+                    let side = if node == 0 {
+                        100.0
+                    } else {
+                        10.0 * f64::from(node)
+                    }
+                    .max(72.0);
+                    (side, side)
+                },
+                |_, (from, to)| Some(format!("{from} -> {to}")),
+                &clusters,
+                &rust_sugiyama::advanced::RenderConfig {
+                    routing_padding: 4.0,
+                    bend_penalty: 6.0,
+                    cluster_padding: 10.0,
+                    cluster_constraint_iterations: 4,
+                    cluster_boundary_gap: 8.0,
+                },
+            );
+            let graphviz = graphviz_layout(&nodes, &edges, &clusters);
+
+            eprintln!("seed={seed}");
+            for (index, &left_node) in nodes.iter().enumerate() {
+                for &right_node in nodes.iter().skip(index + 1) {
+                    let left_graphviz = graphviz.nodes.get(&left_node).expect("graphviz left");
+                    let right_graphviz = graphviz.nodes.get(&right_node).expect("graphviz right");
+                    let left_ours = our_layout.coords.get(&(left_node as usize)).expect("our left");
+                    let right_ours = our_layout.coords.get(&(right_node as usize)).expect("our right");
+                    let left_our_size = if left_node == 0 { (100.0, 100.0) } else { (72.0, 72.0) };
+                    let right_our_size = if right_node == 0 { (100.0, 100.0) } else { (72.0, 72.0) };
+
+                    let graphviz_vertical = axis_relation(
+                        left_graphviz.center.1,
+                        left_graphviz.size.1,
+                        right_graphviz.center.1,
+                        right_graphviz.size.1,
+                    );
+                    let our_vertical = axis_relation(
+                        left_ours.1,
+                        left_our_size.1,
+                        right_ours.1,
+                        right_our_size.1,
+                    );
+                    if graphviz_vertical != our_vertical {
+                        eprintln!(
+                            "  vertical mismatch {left_node}-{right_node}: graphviz={graphviz_vertical:?} ours={our_vertical:?}"
+                        );
+                    } else if graphviz_vertical == AxisRelation::Same {
+                        let graphviz_horizontal = axis_relation(
+                            left_graphviz.center.0,
+                            left_graphviz.size.0,
+                            right_graphviz.center.0,
+                            right_graphviz.size.0,
+                        );
+                        let our_horizontal = axis_relation(
+                            left_ours.0,
+                            left_our_size.0,
+                            right_ours.0,
+                            right_our_size.0,
+                        );
+                        if graphviz_horizontal != our_horizontal {
+                            eprintln!(
+                                "  horizontal mismatch {left_node}-{right_node}: graphviz={graphviz_horizontal:?} ours={our_horizontal:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn dump_moar_reference_layout() {
         let (nodes, edges) = initial_graph();
@@ -614,6 +1058,53 @@ mod tests {
                 "edge[{}] label={:?} label_pos={:?} points={:?} curve_points={:?}",
                 edge.index, edge.label, edge.label_position, edge.points, edge.curve_points
             );
+        }
+    }
+
+    #[test]
+    fn dump_moar_seed_edge_deltas() {
+        for seed in [DEFAULT_GRAPH_SEED, 123, 456, 789] {
+            let (nodes, edges) = initial_graph_with_seed(seed);
+            let clusters = build_clusters(&nodes);
+            let our_layout = compute_layout(
+                &nodes,
+                &edges,
+                &rust_sugiyama::configure::Config {
+                    vertex_spacing: 26.0,
+                    ..Default::default()
+                },
+                |node| {
+                    let side = if node == 0 {
+                        100.0
+                    } else {
+                        10.0 * f64::from(node)
+                    }
+                    .max(72.0);
+                    (side, side)
+                },
+                |_, (from, to)| Some(format!("{from} -> {to}")),
+                &clusters,
+                &rust_sugiyama::advanced::RenderConfig {
+                    routing_padding: 4.0,
+                    bend_penalty: 6.0,
+                    cluster_padding: 10.0,
+                    cluster_constraint_iterations: 4,
+                    cluster_boundary_gap: 8.0,
+                },
+            );
+            let graphviz = graphviz_layout(&nodes, &edges, &clusters);
+            eprintln!("seed={seed}");
+            for (edge, graphviz_edge) in our_layout.edges.iter().zip(graphviz.edges.iter()) {
+                eprintln!(
+                    "  edge[{}] label={:?} graphviz_label_pos={:?} ours_label_pos={:?} graphviz_points={:?} ours_points={:?}",
+                    edge.index,
+                    graphviz_edge.label,
+                    graphviz_edge.label_position,
+                    edge.label_position,
+                    graphviz_edge.points,
+                    edge.points
+                );
+            }
         }
     }
 }

@@ -1198,7 +1198,11 @@ fn endpoint_anchor_and_direction(
     Some((anchor, direction))
 }
 
-fn endpoint_center_direction(anchor: Vector, node_center: Vector, kind: EdgeEndpointKind) -> Option<Vector> {
+fn endpoint_center_direction(
+    anchor: Vector,
+    node_center: Vector,
+    kind: EdgeEndpointKind,
+) -> Option<Vector> {
     let direction = match kind {
         EdgeEndpointKind::Source => Vector::new(anchor.x - node_center.x, anchor.y - node_center.y),
         EdgeEndpointKind::Destination => {

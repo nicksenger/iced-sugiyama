@@ -10,11 +10,11 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::application::Title;
 use iced::mouse;
 use iced::widget::canvas::{self, Path};
-use iced::widget::{button, container, text, Column, Container};
+use iced::widget::{Column, Container, button, container, text};
 use iced::window;
 use iced::window::Screenshot;
+use iced::{Alignment, Background, Color, Element, Font, Length, Task, Theme, border};
 use iced::{Point, Rectangle, Vector};
-use iced::{border, Alignment, Background, Color, Element, Font, Length, Task, Theme};
 use iced_sugiyama::{Cluster, EdgeEndpointKind, Graph, Sugiyama};
 use thiserror::Error;
 
@@ -25,6 +25,7 @@ const MIN_NODE_SIDE: f64 = 72.0;
 
 const WINDOW_WIDTH: f32 = 500.0;
 const WINDOW_HEIGHT: f32 = 500.0;
+const DEFAULT_GRAPH_SEED: u64 = 0x5EED_5EED;
 
 #[derive(Debug, Clone, Copy)]
 enum GraphvizEndpointGlyphKind {
@@ -123,7 +124,7 @@ pub fn main() -> iced::Result {
     .run_with(move || {
         let task = Task::done(Message::AppStarted);
 
-        (Moarificator::new(options.headless), task)
+        (Moarificator::new(options.headless, options.seed), task)
     })
 }
 
@@ -141,11 +142,11 @@ struct Moarificator {
     pending_iced_screenshot: Option<Screenshot>,
 }
 impl Moarificator {
-    fn new(headless: bool) -> Self {
+    fn new(headless: bool, seed: u64) -> Self {
         Self {
             headless,
             export_in_progress: false,
-            graph: initial_graph(),
+            graph: initial_graph(seed),
             pending_graphviz_png: None,
             pending_iced_screenshot: None,
         }
@@ -155,14 +156,44 @@ impl Moarificator {
 #[derive(Debug, Clone, Copy)]
 struct AppOptions {
     headless: bool,
+    seed: u64,
 }
 
 impl AppOptions {
     fn from_env() -> Self {
-        Self {
-            headless: env::args().skip(1).any(|arg| arg == "--headless"),
+        let mut headless = false;
+        let mut seed = DEFAULT_GRAPH_SEED;
+        let mut args = env::args().skip(1);
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--headless" => headless = true,
+                "--seed" => {
+                    let raw_seed = args
+                        .next()
+                        .unwrap_or_else(|| panic!("missing value for --seed"));
+                    seed = parse_seed_arg(&raw_seed);
+                }
+                _ if arg.starts_with("--seed=") => {
+                    seed = parse_seed_arg(&arg["--seed=".len()..]);
+                }
+                _ => {}
+            }
         }
+
+        Self { headless, seed }
     }
+}
+
+fn parse_seed_arg(raw_seed: &str) -> u64 {
+    if let Some(hex_seed) = raw_seed.strip_prefix("0x") {
+        return u64::from_str_radix(hex_seed, 16)
+            .unwrap_or_else(|_| panic!("invalid value for --seed: {raw_seed}"));
+    }
+
+    raw_seed
+        .parse()
+        .unwrap_or_else(|_| panic!("invalid value for --seed: {raw_seed}"))
 }
 
 #[derive(Debug, Clone)]
@@ -504,8 +535,8 @@ fn graph_to_dot(graph: &Graph) -> String {
     dot
 }
 
-fn initial_graph() -> Graph {
-    let mut rng = fastrand::Rng::with_seed(0x5EED_5EED);
+fn initial_graph(seed: u64) -> Graph {
+    let mut rng = fastrand::Rng::with_seed(seed);
     let mut nodes = vec![0_u32];
     let mut edges = Vec::new();
 

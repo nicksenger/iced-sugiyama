@@ -612,11 +612,7 @@ mod tests {
         for edge in &layout.edges {
             eprintln!(
                 "edge[{}] label={:?} label_pos={:?} points={:?} curve_points={:?}",
-                edge.index,
-                edge.label,
-                edge.label_position,
-                edge.points,
-                edge.curve_points
+                edge.index, edge.label, edge.label_position, edge.points, edge.curve_points
             );
         }
     }

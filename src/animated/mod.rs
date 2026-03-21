@@ -2937,6 +2937,20 @@ fn endpoint_anchor_and_direction(
         return None;
     }
 
+    if endpoint_extension <= f32::EPSILON
+        && bezier_curve_points_are_valid(curve_points)
+        && curve_endpoint_on_node_boundary(curve_points, kind, node_center, node_size)
+    {
+        let anchor = match kind {
+            EdgeEndpointKind::Source => curve_points.first().copied(),
+            EdgeEndpointKind::Destination => curve_points.last().copied(),
+        }
+        .map(|point| Vector::new(point.x, point.y))?;
+        let direction = endpoint_center_direction(anchor, node_center, kind)
+            .or_else(|| endpoint_curve_direction(curve_points, kind))?;
+        return Some((anchor, direction));
+    }
+
     let adjusted = extend_polyline_endpoints(points, endpoint_extension);
     match kind {
         EdgeEndpointKind::Source => {
@@ -2948,7 +2962,8 @@ fn endpoint_anchor_and_direction(
                 if inside_from && !inside_to {
                     let anchor = segment_boundary_intersection(from, to, node_center, node_size)
                         .unwrap_or(Vector::new(from.x, from.y));
-                    let direction = endpoint_curve_direction(curve_points, kind)
+                    let direction = endpoint_center_direction(anchor, node_center, kind)
+                        .or_else(|| endpoint_curve_direction(curve_points, kind))
                         .or_else(|| normalize_vector(Vector::new(to.x - from.x, to.y - from.y)))
                         .unwrap_or(Vector::new(1.0, 0.0));
                     return Some((anchor, direction));
@@ -2964,7 +2979,8 @@ fn endpoint_anchor_and_direction(
                 if !inside_from && inside_to {
                     let anchor = segment_boundary_intersection(to, from, node_center, node_size)
                         .unwrap_or(Vector::new(to.x, to.y));
-                    let direction = endpoint_curve_direction(curve_points, kind)
+                    let direction = endpoint_center_direction(anchor, node_center, kind)
+                        .or_else(|| endpoint_curve_direction(curve_points, kind))
                         .or_else(|| normalize_vector(Vector::new(to.x - from.x, to.y - from.y)))
                         .unwrap_or(Vector::new(1.0, 0.0));
                     return Some((anchor, direction));
@@ -2980,8 +2996,6 @@ fn endpoint_anchor_and_direction(
             (adjusted[last - 1], adjusted[last])
         }
     };
-    let direction = endpoint_curve_direction(curve_points, kind)
-        .or_else(|| normalize_vector(Vector::new(to.x - from.x, to.y - from.y)))?;
     let anchor = segment_boundary_intersection(
         Point::new(node_center.x, node_center.y),
         Point::new(to.x, to.y),
@@ -2989,7 +3003,20 @@ fn endpoint_anchor_and_direction(
         node_size,
     )
     .unwrap_or(node_center);
+    let direction = endpoint_center_direction(anchor, node_center, kind)
+        .or_else(|| endpoint_curve_direction(curve_points, kind))
+        .or_else(|| normalize_vector(Vector::new(to.x - from.x, to.y - from.y)))?;
     Some((anchor, direction))
+}
+
+fn endpoint_center_direction(anchor: Vector, node_center: Vector, kind: EdgeEndpointKind) -> Option<Vector> {
+    let direction = match kind {
+        EdgeEndpointKind::Source => Vector::new(anchor.x - node_center.x, anchor.y - node_center.y),
+        EdgeEndpointKind::Destination => {
+            Vector::new(node_center.x - anchor.x, node_center.y - anchor.y)
+        }
+    };
+    normalize_vector(direction)
 }
 
 fn fallback_endpoint_anchor_from_points(
@@ -3192,6 +3219,22 @@ fn endpoint_curve_direction(curve_points: &[Point], kind: EdgeEndpointKind) -> O
     }
 
     None
+}
+
+fn curve_endpoint_on_node_boundary(
+    curve_points: &[Point],
+    kind: EdgeEndpointKind,
+    node_center: Vector,
+    node_size: Size,
+) -> bool {
+    let Some(point) = (match kind {
+        EdgeEndpointKind::Source => curve_points.first().copied(),
+        EdgeEndpointKind::Destination => curve_points.last().copied(),
+    }) else {
+        return false;
+    };
+
+    point_inside_node_rect(point, node_center, node_size)
 }
 
 fn normalize_vector(vector: Vector) -> Option<Vector> {

@@ -8,9 +8,12 @@ use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::application::Title;
+use iced::mouse;
+use iced::widget::canvas::{self, Path};
 use iced::widget::{button, container, text, Column, Container};
 use iced::window;
 use iced::window::Screenshot;
+use iced::{Point, Rectangle, Vector};
 use iced::{border, Alignment, Background, Color, Element, Font, Length, Task, Theme};
 use iced_sugiyama::{Cluster, EdgeEndpointKind, Graph, Sugiyama};
 use thiserror::Error;
@@ -20,8 +23,88 @@ const NODE_BORDER_RADIUS: f32 = 16.0;
 const CLUSTER_BORDER_RADIUS: f32 = 18.0;
 const MIN_NODE_SIDE: f64 = 72.0;
 
-const WINDOW_WIDTH: f32 = 3000.0;
-const WINDOW_HEIGHT: f32 = 1900.0;
+const WINDOW_WIDTH: f32 = 500.0;
+const WINDOW_HEIGHT: f32 = 500.0;
+
+#[derive(Debug, Clone, Copy)]
+enum GraphvizEndpointGlyphKind {
+    OpenDot,
+    NormalArrow,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GraphvizEndpointGlyph {
+    kind: GraphvizEndpointGlyphKind,
+    color: Color,
+    angle_radians: f32,
+}
+
+impl GraphvizEndpointGlyph {
+    fn size(self) -> f32 {
+        match self.kind {
+            GraphvizEndpointGlyphKind::OpenDot => 16.0,
+            GraphvizEndpointGlyphKind::NormalArrow => 20.0,
+        }
+    }
+}
+
+impl<Message, Theme, Renderer> canvas::Program<Message, Theme, Renderer> for GraphvizEndpointGlyph
+where
+    Renderer: iced::advanced::graphics::geometry::Renderer,
+{
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry<Renderer>> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let anchor = frame.center();
+
+        match self.kind {
+            GraphvizEndpointGlyphKind::OpenDot => {
+                let radius = 4.0;
+                let direction = Vector::new(self.angle_radians.cos(), self.angle_radians.sin());
+                let center = Point::new(
+                    anchor.x + direction.x * radius,
+                    anchor.y + direction.y * radius,
+                );
+                let circle = Path::circle(center, radius);
+
+                frame.fill(&circle, Color::WHITE);
+                frame.stroke(
+                    &circle,
+                    canvas::Stroke {
+                        width: 1.5,
+                        style: canvas::stroke::Style::Solid(self.color),
+                        ..canvas::Stroke::default()
+                    },
+                );
+            }
+            GraphvizEndpointGlyphKind::NormalArrow => {
+                let arrow = Path::new(|path| {
+                    path.move_to(Point::new(0.0, 0.0));
+                    path.line_to(Point::new(-10.0, 4.0));
+                    path.line_to(Point::new(-7.25, 0.0));
+                    path.line_to(Point::new(-10.0, -4.0));
+                    path.close();
+                });
+
+                frame.with_save(|frame| {
+                    frame.translate(Vector::new(anchor.x, anchor.y));
+                    frame.rotate(self.angle_radians);
+                    frame.fill(&arrow, self.color);
+                });
+            }
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
 
 pub fn main() -> iced::Result {
     let options = AppOptions::from_env();
@@ -32,6 +115,7 @@ pub fn main() -> iced::Result {
         Moarificator::view,
     )
     .theme(|_| iced::Theme::Light)
+    .scale_factor(|_| 0.6)
     .window(window::Settings {
         size: iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
         ..Default::default()
@@ -263,21 +347,21 @@ impl Moarificator {
             .edge_color(edge_colors)
             .edge_label(edge_label)
             .label_color(|idx| edge_colors(idx).0)
-            .edge_endpoint(|idx, _, kind, _endpoint| {
+            .edge_endpoint(|idx, _, kind, endpoint| {
                 let color = edge_colors(idx).0;
-                let diameter = match kind {
-                    EdgeEndpointKind::Source => 6.0,
-                    EdgeEndpointKind::Destination => 5.0,
+                let kind = match kind {
+                    EdgeEndpointKind::Source => GraphvizEndpointGlyphKind::OpenDot,
+                    EdgeEndpointKind::Destination => GraphvizEndpointGlyphKind::NormalArrow,
+                };
+                let glyph = GraphvizEndpointGlyph {
+                    kind,
+                    color,
+                    angle_radians: endpoint.angle_radians(),
                 };
                 Some(
-                    container(iced::widget::Space::with_width(Length::Shrink))
-                        .width(diameter)
-                        .height(diameter)
-                        .style(move |_| {
-                            container::Style::default()
-                                .background(Background::Color(Color::WHITE))
-                                .border(border::rounded(diameter * 0.5).width(1.5).color(color))
-                        })
+                    canvas::Canvas::new(glyph)
+                        .width(glyph.size())
+                        .height(glyph.size())
                         .into(),
                 )
             })
@@ -286,11 +370,11 @@ impl Moarificator {
             .edge_endpoint_extension(0.0)
             .clusters(clusters)
             .render_config(rust_sugiyama::advanced::RenderConfig {
-                routing_padding: 6.0,
+                routing_padding: 4.0,
                 bend_penalty: 6.0,
-                cluster_padding: 14.0,
+                cluster_padding: 10.0,
                 cluster_constraint_iterations: 4,
-                cluster_boundary_gap: 14.0,
+                cluster_boundary_gap: 8.0,
             })
             .cluster_container(|idx, cluster| {
                 Some(

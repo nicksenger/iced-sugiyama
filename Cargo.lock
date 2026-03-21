@@ -1428,6 +1428,7 @@ dependencies = [
 name = "iced-sugiyama"
 version = "0.1.0"
 dependencies = [
+ "fastrand",
  "iced",
  "lyon_algorithms",
  "petgraph",

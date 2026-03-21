@@ -13,6 +13,9 @@ lyon_algorithms = { workspace = true, optional = true }
 rust-sugiyama.workspace = true
 petgraph = "0.8"
 
+[dev-dependencies]
+fastrand = "2"
+
 [workspace]
 members = [
     "examples/*",

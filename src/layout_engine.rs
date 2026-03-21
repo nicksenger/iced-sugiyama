@@ -330,3 +330,294 @@ fn merge_edge(
             .map(|label| (label.position.0 + x_offset, label.position.1)),
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Cluster, compute_layout};
+
+    fn initial_graph() -> (Vec<u32>, Vec<(u32, u32)>) {
+        let mut rng = fastrand::Rng::with_seed(0x5EED_5EED);
+        let mut nodes = vec![0_u32];
+        let mut edges = Vec::new();
+
+        for to in 1_u32..=6 {
+            let max_edges = usize::min(3, to as usize);
+            let edge_count = rng.usize(1..=max_edges);
+            let mut connected_from = std::collections::HashSet::new();
+
+            while connected_from.len() < edge_count {
+                let from = rng.u32(0..to);
+                if connected_from.insert(from) {
+                    edges.push((from, to));
+                }
+            }
+
+            nodes.push(to);
+        }
+
+        (nodes, edges)
+    }
+
+    fn build_clusters(nodes: &[u32]) -> Vec<Cluster> {
+        let even_cluster_nodes = nodes
+            .iter()
+            .copied()
+            .filter(|node| *node != 0 && node % 2 == 0)
+            .collect::<Vec<_>>();
+        let odd_cluster_nodes = nodes
+            .iter()
+            .copied()
+            .filter(|node| *node % 2 == 1)
+            .collect::<Vec<_>>();
+        let all_cluster_nodes = nodes
+            .iter()
+            .copied()
+            .filter(|node| *node != 0)
+            .collect::<Vec<_>>();
+
+        let mut clusters = Vec::new();
+        let mut parent_cluster_index = None;
+        if all_cluster_nodes.len() > 2 {
+            parent_cluster_index = Some(clusters.len());
+            clusters.push(Cluster::new(all_cluster_nodes).padding(10.0));
+        }
+        if odd_cluster_nodes.len() > 1 {
+            let cluster = Cluster::new(odd_cluster_nodes).padding(10.0);
+            clusters.push(match parent_cluster_index {
+                Some(parent) => cluster.parent(parent),
+                None => cluster,
+            });
+        }
+        if even_cluster_nodes.len() > 1 {
+            let cluster = Cluster::new(even_cluster_nodes).padding(10.0);
+            clusters.push(match parent_cluster_index {
+                Some(parent) => cluster.parent(parent),
+                None => cluster,
+            });
+        }
+
+        clusters
+    }
+
+    fn graph_to_dot(nodes: &[u32], edges: &[(u32, u32)], clusters: &[Cluster]) -> String {
+        fn node_label(node: u32) -> String {
+            if node == 0 {
+                "Moar".to_string()
+            } else {
+                node.to_string()
+            }
+        }
+
+        fn edge_label((from, to): (u32, u32)) -> String {
+            format!("{from} -> {to}")
+        }
+
+        fn node_size(node: u32) -> (f64, f64) {
+            let side = if node == 0 {
+                100.0
+            } else {
+                10.0 * f64::from(node)
+            }
+            .max(72.0);
+            (side, side)
+        }
+
+        fn dot_escape(value: &str) -> String {
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        }
+
+        fn edge_color(index: usize) -> &'static str {
+            match index % 9 {
+                0 => "#7393B3FF",
+                1 => "#1434A4FF",
+                2 => "#3F00FFFF",
+                3 => "#1F51FFFF",
+                4 => "#4682B4FF",
+                5 => "#088F8FFF",
+                6 => "#00A36CFF",
+                7 => "#008080FF",
+                _ => "#40B5ADFF",
+            }
+        }
+
+        fn cluster_color(index: usize) -> &'static str {
+            match index % 2 {
+                0 => "#FF7043E6",
+                _ => "#2E7D32E6",
+            }
+        }
+
+        fn push_node_dot(dot: &mut String, indent: usize, node: u32) {
+            let indent_str = "    ".repeat(indent);
+            let (width, height) = node_size(node);
+            dot.push_str(&format!(
+                "{indent_str}{node} [label=\"{}\", width={:.6}, height={:.6}];\n",
+                dot_escape(&node_label(node)),
+                width / 96.0,
+                height / 96.0
+            ));
+        }
+
+        fn cluster_label(index: usize, cluster: &Cluster) -> String {
+            match cluster.parent {
+                Some(parent) => format!("cluster {index} (child of {parent})"),
+                None => format!("cluster {index}"),
+            }
+        }
+
+        fn push_cluster_dot(dot: &mut String, clusters: &[Cluster], index: usize, indent: usize) {
+            let indent_str = "    ".repeat(indent);
+            let cluster = &clusters[index];
+            let color = cluster_color(index);
+            dot.push_str(&format!("{indent_str}subgraph cluster_{index} {{\n"));
+            dot.push_str(&format!(
+                "{indent_str}    label=\"{}\";\n",
+                dot_escape(&cluster_label(index, cluster))
+            ));
+            dot.push_str(&format!("{indent_str}    fontname=\"Times-Roman\";\n"));
+            dot.push_str(&format!("{indent_str}    color=\"{color}\";\n"));
+            dot.push_str(&format!("{indent_str}    fontcolor=\"{color}\";\n"));
+            dot.push_str(&format!("{indent_str}    pencolor=\"{color}\";\n"));
+            dot.push_str(&format!("{indent_str}    style=\"rounded\";\n"));
+            if let Some(padding) = cluster.padding {
+                dot.push_str(&format!("{indent_str}    margin={padding:.6};\n"));
+            }
+
+            let mut descendant_nodes = std::collections::HashSet::new();
+            for child_index in 0..clusters.len() {
+                if clusters[child_index].parent == Some(index) {
+                    descendant_nodes.extend(clusters[child_index].nodes.iter().copied());
+                }
+            }
+
+            for node in cluster
+                .nodes
+                .iter()
+                .copied()
+                .filter(|node| !descendant_nodes.contains(node))
+            {
+                push_node_dot(dot, indent + 1, node);
+            }
+
+            for child_index in 0..clusters.len() {
+                if clusters[child_index].parent == Some(index) {
+                    push_cluster_dot(dot, clusters, child_index, indent + 1);
+                }
+            }
+
+            dot.push_str(&format!("{indent_str}}}\n"));
+        }
+
+        let mut dot = String::from("digraph G {\n");
+        dot.push_str("    graph [\n");
+        dot.push_str("        rankdir=TB,\n");
+        dot.push_str("        compound=true,\n");
+        dot.push_str("        dpi=96,\n");
+        dot.push_str("        pad=0.520833,\n");
+        dot.push_str("        nodesep=0.270833,\n");
+        dot.push_str("        ranksep=0.270833\n");
+        dot.push_str("    ];\n");
+        dot.push_str("    node [shape=box, style=\"rounded,filled\", fillcolor=\"#f5f5f5\", color=\"#444444\", fixedsize=true, fontname=\"Times-Roman\"];\n");
+        dot.push_str(
+            "    edge [dir=both, arrowtail=odot, arrowhead=normal, fontname=\"Times-Roman\"];\n",
+        );
+
+        let clustered_nodes = clusters
+            .iter()
+            .flat_map(|cluster| cluster.nodes.iter().copied())
+            .collect::<std::collections::HashSet<_>>();
+
+        for node in nodes
+            .iter()
+            .copied()
+            .filter(|node| !clustered_nodes.contains(node))
+        {
+            push_node_dot(&mut dot, 1, node);
+        }
+
+        for cluster_index in 0..clusters.len() {
+            if clusters[cluster_index].parent.is_none() {
+                push_cluster_dot(&mut dot, clusters, cluster_index, 1);
+            }
+        }
+
+        for (index, edge) in edges.iter().copied().enumerate() {
+            let color = edge_color(index);
+            dot.push_str(&format!(
+                "    {} -> {} [label=\"{}\", color=\"{}\", fontcolor=\"{}\", minlen=1];\n",
+                edge.0,
+                edge.1,
+                dot_escape(&edge_label(edge)),
+                color,
+                color
+            ));
+        }
+
+        dot.push_str("}\n");
+        dot
+    }
+
+    #[test]
+    fn dump_moar_reference_layout() {
+        let (nodes, edges) = initial_graph();
+        let clusters = build_clusters(&nodes);
+        let layout = compute_layout(
+            &nodes,
+            &edges,
+            &rust_sugiyama::configure::Config {
+                vertex_spacing: 26.0,
+                ..Default::default()
+            },
+            |node| {
+                let side = if node == 0 {
+                    100.0
+                } else {
+                    10.0 * f64::from(node)
+                }
+                .max(72.0);
+                (side, side)
+            },
+            |_, (from, to)| Some(format!("{from} -> {to}")),
+            &clusters,
+            &rust_sugiyama::advanced::RenderConfig {
+                routing_padding: 4.0,
+                bend_penalty: 6.0,
+                cluster_padding: 10.0,
+                cluster_constraint_iterations: 4,
+                cluster_boundary_gap: 8.0,
+            },
+        );
+
+        eprintln!("nodes={nodes:?}");
+        eprintln!("edges={edges:?}");
+        eprintln!("dot:\n{}", graph_to_dot(&nodes, &edges, &clusters));
+        eprintln!("layout.max=({}, {})", layout.max_x, layout.max_y);
+        for (index, (x, y)) in &layout.coords {
+            eprintln!("node[{index}] center=({x:.3}, {y:.3})");
+        }
+        for cluster in &layout.clusters {
+            eprintln!(
+                "cluster[{}] parent={:?} bounds=({:.3}, {:.3})..({:.3}, {:.3})",
+                cluster.index,
+                cluster.parent,
+                cluster.min_x,
+                cluster.min_y,
+                cluster.max_x,
+                cluster.max_y
+            );
+        }
+        for edge in &layout.edges {
+            eprintln!(
+                "edge[{}] label={:?} label_pos={:?} points={:?} curve_points={:?}",
+                edge.index,
+                edge.label,
+                edge.label_position,
+                edge.points,
+                edge.curve_points
+            );
+        }
+    }
+}

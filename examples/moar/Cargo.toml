@@ -15,4 +15,5 @@ fastrand = "2"
 image = { version = "0.24", default-features = false, features = ["png"] }
 iced.workspace = true
 iced-sugiyama = { path = "../.." }
+rust-sugiyama = { path = "../../../rust-sugiyama" }
 thiserror = "2"

@@ -3,15 +3,16 @@ use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+#[cfg(feature = "animated")]
 use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::application::Title;
-use iced::widget::{Column, Container, button, container, text};
+use iced::widget::{button, container, text, Column, Container};
 use iced::window;
 use iced::window::Screenshot;
-use iced::{Alignment, Background, Color, Element, Font, Length, Task, Theme, border};
-use iced_sugiyama::{Cluster, EdgeEndpoint, EdgeEndpointKind, Graph, Sugiyama};
+use iced::{border, Alignment, Background, Color, Element, Font, Length, Task, Theme};
+use iced_sugiyama::{Cluster, EdgeEndpointKind, Graph, Sugiyama};
 use thiserror::Error;
 
 const GRAPH_FONT: Font = Font::with_name("Times New Roman");
@@ -19,8 +20,8 @@ const NODE_BORDER_RADIUS: f32 = 16.0;
 const CLUSTER_BORDER_RADIUS: f32 = 18.0;
 const MIN_NODE_SIDE: f64 = 72.0;
 
-const WINDOW_WIDTH: f32 = 2600.0;
-const WINDOW_HEIGHT: f32 = 1600.0;
+const WINDOW_WIDTH: f32 = 3000.0;
+const WINDOW_HEIGHT: f32 = 1900.0;
 
 pub fn main() -> iced::Result {
     let options = AppOptions::from_env();
@@ -36,11 +37,7 @@ pub fn main() -> iced::Result {
         ..Default::default()
     })
     .run_with(move || {
-        let task = if options.headless {
-            Task::done(Message::RenderMergedPng)
-        } else {
-            Task::none()
-        };
+        let task = Task::done(Message::AppStarted);
 
         (Moarificator::new(options.headless), task)
     })
@@ -86,6 +83,7 @@ impl AppOptions {
 
 #[derive(Debug, Clone)]
 enum Message {
+    AppStarted,
     Moar(u32),
     RenderMergedPng,
     CaptureIcedView,
@@ -123,6 +121,18 @@ enum MergePngError {
 impl Moarificator {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::AppStarted => {
+                let resize = window::get_latest().and_then(|id| {
+                    window::resize::<f32>(id, iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+                        .discard()
+                });
+
+                if self.headless {
+                    return Task::batch([resize, Task::done(Message::RenderMergedPng)]);
+                }
+
+                return resize;
+            }
             Message::RenderMergedPng => {
                 self.export_in_progress = true;
                 self.pending_graphviz_png = None;
@@ -252,25 +262,36 @@ impl Moarificator {
             })
             .edge_color(edge_colors)
             .edge_label(edge_label)
-            .edge_label_element(|idx, edge, _s| {
-                edge_label(idx, edge).map(|label| {
-                    text(label)
-                        .font(GRAPH_FONT)
-                        .color(edge_colors(idx).0)
-                        .into()
-                })
-            })
-            .edge_endpoint(|_, _, kind, endpoint| {
-                let marker = match kind {
-                    EdgeEndpointKind::Source => "o",
-                    EdgeEndpointKind::Destination => directional_marker(endpoint),
+            .label_color(|idx| edge_colors(idx).0)
+            .edge_endpoint(|idx, _, kind, _endpoint| {
+                let color = edge_colors(idx).0;
+                let diameter = match kind {
+                    EdgeEndpointKind::Source => 6.0,
+                    EdgeEndpointKind::Destination => 5.0,
                 };
-                Some(iced::widget::text(marker).size(14).font(GRAPH_FONT).into())
+                Some(
+                    container(iced::widget::Space::with_width(Length::Shrink))
+                        .width(diameter)
+                        .height(diameter)
+                        .style(move |_| {
+                            container::Style::default()
+                                .background(Background::Color(Color::WHITE))
+                                .border(border::rounded(diameter * 0.5).width(1.5).color(color))
+                        })
+                        .into(),
+                )
             })
             .node_size(node_size)
             .edge_corner_radius(8.0)
             .edge_endpoint_extension(0.0)
             .clusters(clusters)
+            .render_config(rust_sugiyama::advanced::RenderConfig {
+                routing_padding: 6.0,
+                bend_penalty: 6.0,
+                cluster_padding: 14.0,
+                cluster_constraint_iterations: 4,
+                cluster_boundary_gap: 14.0,
+            })
             .cluster_container(|idx, cluster| {
                 Some(
                     container(
@@ -292,7 +313,7 @@ impl Moarificator {
                 )
             })
             .cluster_color(|_| Color::TRANSPARENT)
-            .padding(50);
+            .padding(70);
 
             #[cfg(feature = "animated")]
             let graph = {
@@ -422,7 +443,10 @@ fn initial_graph() -> Graph {
     Graph {
         nodes,
         edges,
-        config: Default::default(),
+        config: rust_sugiyama::configure::Config {
+            vertex_spacing: 26.0,
+            ..Default::default()
+        },
     }
 }
 
@@ -705,17 +729,4 @@ fn dot_escape(value: &str) -> String {
 fn color_to_hex(color: iced::Color) -> String {
     let [r, g, b, a] = color.into_rgba8();
     format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
-}
-
-fn directional_marker(endpoint: EdgeEndpoint) -> &'static str {
-    let angle = endpoint.angle_radians();
-    if (-std::f32::consts::FRAC_PI_4..std::f32::consts::FRAC_PI_4).contains(&angle) {
-        ">"
-    } else if (std::f32::consts::FRAC_PI_4..3.0 * std::f32::consts::FRAC_PI_4).contains(&angle) {
-        "v"
-    } else if (-3.0 * std::f32::consts::FRAC_PI_4..-std::f32::consts::FRAC_PI_4).contains(&angle) {
-        "^"
-    } else {
-        "<"
-    }
 }

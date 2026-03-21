@@ -2408,12 +2408,23 @@ fn edge_endpoint_metadata(
         .iter()
         .map(|(x, y)| Point::new(*x as f32, *y as f32))
         .collect::<Vec<_>>();
-    endpoint_anchor_and_direction(&points, kind, node_center, node_size, endpoint_extension).map(
-        |(_, direction)| EdgeEndpoint {
-            direction_x: direction.x,
-            direction_y: direction.y,
-        },
+    let curve_points = edge
+        .curve_points
+        .iter()
+        .map(|(x, y)| Point::new(*x as f32, *y as f32))
+        .collect::<Vec<_>>();
+    endpoint_anchor_and_direction(
+        &points,
+        &curve_points,
+        kind,
+        node_center,
+        node_size,
+        endpoint_extension,
     )
+    .map(|(_, direction)| EdgeEndpoint {
+        direction_x: direction.x,
+        direction_y: direction.y,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2621,30 +2632,55 @@ fn edge_endpoint_positions(
                         } else {
                             Vec::new()
                         };
+                        let curve_points = if let Some(old_edge) =
+                            old_edges.get(&child.edge_index).copied()
+                        {
+                            old_edge
+                                .curve_points
+                                .iter()
+                                .map(|(x, y)| {
+                                    Point::new(*x as f32 + old_offset.x, *y as f32 + old_offset.y)
+                                })
+                                .collect::<Vec<_>>()
+                        } else if let Some(new_edge) = new_edges.get(&child.edge_index).copied() {
+                            new_edge
+                                .curve_points
+                                .iter()
+                                .map(|(x, y)| {
+                                    Point::new(*x as f32 + new_offset.x, *y as f32 + new_offset.y)
+                                })
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
 
                         match (
                             (!points.is_empty()).then_some(points),
+                            (!curve_points.is_empty()).then_some(curve_points),
                             node_center_and_size(node_map, node_positions, node_sizes, child),
                         ) {
-                            (Some(points), Some((center, node_size))) => {
+                            (Some(points), curve_points, Some((center, node_size))) => {
                                 endpoint_anchor_and_direction(
                                     &points,
+                                    curve_points.as_deref().unwrap_or(&[]),
                                     child.kind,
                                     center,
                                     node_size,
                                     endpoint_extension,
                                 )
-                                .map(|(anchor, _)| anchor)
+                                .map(|(anchor, direction)| {
+                                    offset_endpoint_anchor(anchor, direction, child.kind)
+                                })
                                 .unwrap_or(center)
                             }
-                            (Some(points), None) => fallback_endpoint_anchor_from_points(
+                            (Some(points), _, None) => fallback_endpoint_anchor_from_points(
                                 &points,
                                 child.kind,
                                 endpoint_extension,
                             )
                             .unwrap_or(Vector::new(new_offset.x, new_offset.y)),
-                            (None, Some((center, _))) => center,
-                            (None, None) => Vector::new(new_offset.x, new_offset.y),
+                            (None, _, Some((center, _))) => center,
+                            (None, _, None) => Vector::new(new_offset.x, new_offset.y),
                         }
                     })
                     .collect()
@@ -2719,27 +2755,31 @@ fn edge_endpoint_positions(
 
                         match (
                             (!points.is_empty()).then_some(points),
+                            None::<Vec<Point>>,
                             node_center_and_size(node_map, node_positions, node_sizes, child),
                         ) {
-                            (Some(points), Some((center, node_size))) => {
+                            (Some(points), curve_points, Some((center, node_size))) => {
                                 endpoint_anchor_and_direction(
                                     &points,
+                                    curve_points.as_deref().unwrap_or(&[]),
                                     child.kind,
                                     center,
                                     node_size,
                                     endpoint_extension,
                                 )
-                                .map(|(anchor, _)| anchor)
+                                .map(|(anchor, direction)| {
+                                    offset_endpoint_anchor(anchor, direction, child.kind)
+                                })
                                 .unwrap_or(center)
                             }
-                            (Some(points), None) => fallback_endpoint_anchor_from_points(
+                            (Some(points), _, None) => fallback_endpoint_anchor_from_points(
                                 &points,
                                 child.kind,
                                 endpoint_extension,
                             )
                             .unwrap_or(Vector::new(new_offset.x, new_offset.y)),
-                            (None, Some((center, _))) => center,
-                            (None, None) => Vector::new(new_offset.x, new_offset.y),
+                            (None, _, Some((center, _))) => center,
+                            (None, _, None) => Vector::new(new_offset.x, new_offset.y),
                         }
                     })
                     .collect()
@@ -2765,29 +2805,44 @@ fn edge_endpoint_positions(
                                     .collect::<Vec<_>>()
                             })
                             .unwrap_or_default();
+                        let curve_points = edges
+                            .get(&child.edge_index)
+                            .map(|edge| {
+                                edge.curve_points
+                                    .iter()
+                                    .map(|(x, y)| {
+                                        Point::new(*x as f32 + offset.x, *y as f32 + offset.y)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
                         match (
                             (!points.is_empty()).then_some(points),
+                            (!curve_points.is_empty()).then_some(curve_points),
                             node_center_and_size(node_map, node_positions, node_sizes, child),
                         ) {
-                            (Some(points), Some((center, node_size))) => {
+                            (Some(points), curve_points, Some((center, node_size))) => {
                                 endpoint_anchor_and_direction(
                                     &points,
+                                    curve_points.as_deref().unwrap_or(&[]),
                                     child.kind,
                                     center,
                                     node_size,
                                     endpoint_extension,
                                 )
-                                .map(|(anchor, _)| anchor)
+                                .map(|(anchor, direction)| {
+                                    offset_endpoint_anchor(anchor, direction, child.kind)
+                                })
                                 .unwrap_or(center)
                             }
-                            (Some(points), None) => fallback_endpoint_anchor_from_points(
+                            (Some(points), _, None) => fallback_endpoint_anchor_from_points(
                                 &points,
                                 child.kind,
                                 endpoint_extension,
                             )
                             .unwrap_or(Vector::new(offset.x, offset.y)),
-                            (None, Some((center, _))) => center,
-                            (None, None) => Vector::new(offset.x, offset.y),
+                            (None, _, Some((center, _))) => center,
+                            (None, _, None) => Vector::new(offset.x, offset.y),
                         }
                     })
                     .collect()
@@ -2812,27 +2867,42 @@ fn edge_endpoint_positions(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                let curve_points = edges
+                    .get(&child.edge_index)
+                    .map(|edge| {
+                        edge.curve_points
+                            .iter()
+                            .map(|(x, y)| Point::new(*x as f32 + offset.x, *y as f32 + offset.y))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 match (
                     (!points.is_empty()).then_some(points),
+                    (!curve_points.is_empty()).then_some(curve_points),
                     node_center_and_size(node_map, node_positions, node_sizes, child),
                 ) {
-                    (Some(points), Some((center, node_size))) => endpoint_anchor_and_direction(
-                        &points,
-                        child.kind,
-                        center,
-                        node_size,
-                        endpoint_extension,
-                    )
-                    .map(|(anchor, _)| anchor)
-                    .unwrap_or(center),
-                    (Some(points), None) => fallback_endpoint_anchor_from_points(
+                    (Some(points), curve_points, Some((center, node_size))) => {
+                        endpoint_anchor_and_direction(
+                            &points,
+                            curve_points.as_deref().unwrap_or(&[]),
+                            child.kind,
+                            center,
+                            node_size,
+                            endpoint_extension,
+                        )
+                        .map(|(anchor, direction)| {
+                            offset_endpoint_anchor(anchor, direction, child.kind)
+                        })
+                        .unwrap_or(center)
+                    }
+                    (Some(points), _, None) => fallback_endpoint_anchor_from_points(
                         &points,
                         child.kind,
                         endpoint_extension,
                     )
                     .unwrap_or(Vector::new(offset.x, offset.y)),
-                    (None, Some((center, _))) => center,
-                    (None, None) => Vector::new(offset.x, offset.y),
+                    (None, _, Some((center, _))) => center,
+                    (None, _, None) => Vector::new(offset.x, offset.y),
                 }
             })
             .collect()
@@ -2857,6 +2927,7 @@ fn node_center_and_size(
 
 fn endpoint_anchor_and_direction(
     points: &[Point],
+    curve_points: &[Point],
     kind: EdgeEndpointKind,
     node_center: Vector,
     node_size: Size,
@@ -2877,7 +2948,8 @@ fn endpoint_anchor_and_direction(
                 if inside_from && !inside_to {
                     let anchor = segment_boundary_intersection(from, to, node_center, node_size)
                         .unwrap_or(Vector::new(from.x, from.y));
-                    let direction = normalize_vector(Vector::new(to.x - from.x, to.y - from.y))
+                    let direction = endpoint_curve_direction(curve_points, kind)
+                        .or_else(|| normalize_vector(Vector::new(to.x - from.x, to.y - from.y)))
                         .unwrap_or(Vector::new(1.0, 0.0));
                     return Some((anchor, direction));
                 }
@@ -2892,7 +2964,8 @@ fn endpoint_anchor_and_direction(
                 if !inside_from && inside_to {
                     let anchor = segment_boundary_intersection(to, from, node_center, node_size)
                         .unwrap_or(Vector::new(to.x, to.y));
-                    let direction = normalize_vector(Vector::new(to.x - from.x, to.y - from.y))
+                    let direction = endpoint_curve_direction(curve_points, kind)
+                        .or_else(|| normalize_vector(Vector::new(to.x - from.x, to.y - from.y)))
                         .unwrap_or(Vector::new(1.0, 0.0));
                     return Some((anchor, direction));
                 }
@@ -2907,7 +2980,8 @@ fn endpoint_anchor_and_direction(
             (adjusted[last - 1], adjusted[last])
         }
     };
-    let direction = normalize_vector(Vector::new(to.x - from.x, to.y - from.y))?;
+    let direction = endpoint_curve_direction(curve_points, kind)
+        .or_else(|| normalize_vector(Vector::new(to.x - from.x, to.y - from.y)))?;
     let anchor = segment_boundary_intersection(
         Point::new(node_center.x, node_center.y),
         Point::new(to.x, to.y),
@@ -2931,6 +3005,19 @@ fn fallback_endpoint_anchor_from_points(
         EdgeEndpointKind::Source => adjusted.first().map(|point| Vector::new(point.x, point.y)),
         EdgeEndpointKind::Destination => adjusted.last().map(|point| Vector::new(point.x, point.y)),
     }
+}
+
+fn offset_endpoint_anchor(anchor: Vector, direction: Vector, kind: EdgeEndpointKind) -> Vector {
+    let offset_distance = 0.0;
+    let sign = match kind {
+        EdgeEndpointKind::Source => 1.0,
+        EdgeEndpointKind::Destination => -1.0,
+    };
+
+    Vector::new(
+        anchor.x + direction.x * offset_distance * sign,
+        anchor.y + direction.y * offset_distance * sign,
+    )
 }
 
 fn point_inside_node_rect(point: Point, node_center: Vector, node_size: Size) -> bool {
@@ -2965,6 +3052,44 @@ fn segment_boundary_intersection(
     let min_y = node_center.y - half_height;
     let max_y = node_center.y + half_height;
 
+    let radius = (node_size.width.min(node_size.height) * 0.25).min(18.0);
+    segment_boundary_intersection_t(inside, outside, node_center, node_size)
+        .and_then(|t| {
+            let x = inside.x + dx * t;
+            let y = inside.y + dy * t;
+            rounded_rect_boundary_intersection(
+                Point::new(x, y),
+                normalize_vector(Vector::new(dx, dy))?,
+                node_center,
+                node_size,
+                radius,
+            )
+        })
+        .or_else(|| {
+            segment_boundary_intersection_t(inside, outside, node_center, node_size)
+                .map(|t| Vector::new(inside.x + dx * t, inside.y + dy * t))
+        })
+}
+
+fn segment_boundary_intersection_t(
+    inside: Point,
+    outside: Point,
+    node_center: Vector,
+    node_size: Size,
+) -> Option<f32> {
+    let dx = outside.x - inside.x;
+    let dy = outside.y - inside.y;
+    if dx.abs() <= f32::EPSILON && dy.abs() <= f32::EPSILON {
+        return None;
+    }
+
+    let half_width = node_size.width * 0.5;
+    let half_height = node_size.height * 0.5;
+    let min_x = node_center.x - half_width;
+    let max_x = node_center.x + half_width;
+    let min_y = node_center.y - half_height;
+    let max_y = node_center.y + half_height;
+
     let mut t_values = Vec::with_capacity(2);
     if dx > f32::EPSILON {
         t_values.push((max_x - inside.x) / dx);
@@ -2984,13 +3109,89 @@ fn segment_boundary_intersection(
             let x = inside.x + dx * t;
             let y = inside.y + dy * t;
             if x >= min_x - 1e-2 && x <= max_x + 1e-2 && y >= min_y - 1e-2 && y <= max_y + 1e-2 {
-                Some((t, Vector::new(x, y)))
+                Some(t)
             } else {
                 None
             }
         })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, intersection)| intersection)
+        .min_by(|a, b| a.total_cmp(b))
+}
+
+fn rounded_rect_boundary_intersection(
+    rect_intersection: Point,
+    direction: Vector,
+    node_center: Vector,
+    node_size: Size,
+    radius: f32,
+) -> Option<Vector> {
+    let half_width = node_size.width * 0.5;
+    let half_height = node_size.height * 0.5;
+    let abs_x = (rect_intersection.x - node_center.x).abs();
+    let abs_y = (rect_intersection.y - node_center.y).abs();
+    let inner_half_width = (half_width - radius).max(0.0);
+    let inner_half_height = (half_height - radius).max(0.0);
+
+    let corner_center = Vector::new(
+        node_center.x + (rect_intersection.x - node_center.x).signum() * inner_half_width,
+        node_center.y + (rect_intersection.y - node_center.y).signum() * inner_half_height,
+    );
+
+    if abs_x <= inner_half_width + 1e-3 || abs_y <= inner_half_height + 1e-3 || radius <= 1e-3 {
+        return Some(Vector::new(rect_intersection.x, rect_intersection.y));
+    }
+
+    let ray_start = Vector::new(node_center.x, node_center.y);
+    ray_circle_intersection(ray_start, direction, corner_center, radius)
+        .or_else(|| Some(Vector::new(rect_intersection.x, rect_intersection.y)))
+}
+
+fn ray_circle_intersection(
+    origin: Vector,
+    direction: Vector,
+    center: Vector,
+    radius: f32,
+) -> Option<Vector> {
+    let ox = origin.x - center.x;
+    let oy = origin.y - center.y;
+    let a = direction.x * direction.x + direction.y * direction.y;
+    let b = 2.0 * (ox * direction.x + oy * direction.y);
+    let c = ox * ox + oy * oy - radius * radius;
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let sqrt_discriminant = discriminant.sqrt();
+    let mut roots = [
+        (-b - sqrt_discriminant) / (2.0 * a),
+        (-b + sqrt_discriminant) / (2.0 * a),
+    ];
+    roots.sort_by(|left, right| left.total_cmp(right));
+    roots
+        .into_iter()
+        .find(|t| *t >= 0.0)
+        .map(|t| Vector::new(origin.x + direction.x * t, origin.y + direction.y * t))
+}
+
+fn endpoint_curve_direction(curve_points: &[Point], kind: EdgeEndpointKind) -> Option<Vector> {
+    if curve_points.len() >= 4 && (curve_points.len() - 1) % 3 == 0 {
+        return match kind {
+            EdgeEndpointKind::Source => curve_points.get(1).and_then(|control| {
+                normalize_vector(Vector::new(
+                    control.x - curve_points[0].x,
+                    control.y - curve_points[0].y,
+                ))
+            }),
+            EdgeEndpointKind::Destination => {
+                let end = curve_points.last().copied()?;
+                let control = curve_points
+                    .get(curve_points.len().saturating_sub(2))
+                    .copied()?;
+                normalize_vector(Vector::new(end.x - control.x, end.y - control.y))
+            }
+        };
+    }
+
+    None
 }
 
 fn normalize_vector(vector: Vector) -> Option<Vector> {

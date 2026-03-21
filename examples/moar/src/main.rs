@@ -23,10 +23,11 @@ const NODE_BORDER_RADIUS: f32 = 16.0;
 const CLUSTER_BORDER_RADIUS: f32 = 18.0;
 const MIN_NODE_SIDE: f64 = 72.0;
 
-const WINDOW_WIDTH: f32 = 500.0;
-const WINDOW_HEIGHT: f32 = 500.0;
+const WINDOW_WIDTH: f32 = 800.0;
+const WINDOW_HEIGHT: f32 = 800.0;
 const DEFAULT_GRAPH_SEED: u64 = 0x5EED_5EED;
 const DEFAULT_GRAPH_NODE_COUNT: u32 = 6;
+const GRAPHVIZ_PNG_SCALE: f64 = 0.7;
 
 #[derive(Debug, Clone, Copy)]
 enum GraphvizEndpointGlyphKind {
@@ -117,7 +118,7 @@ pub fn main() -> iced::Result {
         Moarificator::view,
     )
     .theme(|_| iced::Theme::Light)
-    .scale_factor(|_| 0.6)
+    .scale_factor(|_| 0.8)
     .window(window::Settings {
         size: iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
         ..Default::default()
@@ -249,8 +250,6 @@ enum GraphvizPngError {
 
 #[derive(Debug, Error)]
 enum MergePngError {
-    #[error("failed to determine current working directory")]
-    CurrentDirectory(#[source] std::io::Error),
     #[error("failed to decode graphviz png")]
     DecodeGraphviz(#[source] image::ImageError),
     #[error("failed to create iced screenshot image buffer")]
@@ -638,16 +637,19 @@ async fn render_graphviz_png(graph: Graph) -> Result<Vec<u8>, String> {
 }
 
 async fn save_merged_png(graphviz_png: Vec<u8>, screenshot: Screenshot) -> Result<PathBuf, String> {
-    let output_path = env::current_dir()
-        .map_err(MergePngError::CurrentDirectory)
-        .map_err(|error| error.to_string())?
-        .join("moar-render.png");
+    let output_path = PathBuf::from("/tmp/moar-render.png");
 
     let graphviz_image =
         image::load_from_memory_with_format(&graphviz_png, image::ImageFormat::Png)
             .map_err(MergePngError::DecodeGraphviz)
             .map_err(|error| error.to_string())?
             .to_rgba8();
+    let graphviz_image = image::imageops::resize(
+        &graphviz_image,
+        scaled_dimension(graphviz_image.width(), GRAPHVIZ_PNG_SCALE),
+        scaled_dimension(graphviz_image.height(), GRAPHVIZ_PNG_SCALE),
+        image::imageops::FilterType::Lanczos3,
+    );
     let iced_image = image::RgbaImage::from_raw(
         screenshot.size.width,
         screenshot.size.height,
@@ -677,6 +679,18 @@ async fn save_merged_png(graphviz_png: Vec<u8>, screenshot: Screenshot) -> Resul
         .map_err(|error| error.to_string())?;
 
     Ok(output_path)
+}
+
+fn scaled_dimension(value: u32, factor: f64) -> u32 {
+    let scaled = (f64::from(value) * factor).round();
+
+    if scaled < 1.0 {
+        1
+    } else if scaled > f64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        scaled as u32
+    }
 }
 
 fn build_clusters(graph: &Graph) -> Vec<Cluster> {

@@ -609,7 +609,11 @@ mod tests {
         dot
     }
 
-    fn graphviz_layout(nodes: &[u32], edges: &[(u32, u32)], clusters: &[Cluster]) -> GraphvizLayout {
+    fn graphviz_layout(
+        nodes: &[u32],
+        edges: &[(u32, u32)],
+        clusters: &[Cluster],
+    ) -> GraphvizLayout {
         let dot = graph_to_dot(nodes, edges, clusters);
         let mut child = Command::new("dot")
             .arg("-Tjson0")
@@ -695,16 +699,8 @@ mod tests {
 
     fn parse_point(value: &str) -> (f64, f64) {
         let mut parts = value.split(',');
-        let x = parts
-            .next()
-            .expect("x")
-            .parse::<f64>()
-            .expect("parse x");
-        let y = parts
-            .next()
-            .expect("y")
-            .parse::<f64>()
-            .expect("parse y");
+        let x = parts.next().expect("x").parse::<f64>().expect("parse x");
+        let y = parts.next().expect("y").parse::<f64>().expect("parse y");
         (x, y)
     }
 
@@ -801,8 +797,14 @@ mod tests {
             for &right_node in nodes.iter().skip(index + 1) {
                 let left_graphviz = graphviz.nodes.get(&left_node).expect("graphviz left");
                 let right_graphviz = graphviz.nodes.get(&right_node).expect("graphviz right");
-                let left_ours = our_layout.coords.get(&(left_node as usize)).expect("our left");
-                let right_ours = our_layout.coords.get(&(right_node as usize)).expect("our right");
+                let left_ours = our_layout
+                    .coords
+                    .get(&(left_node as usize))
+                    .expect("our left");
+                let right_ours = our_layout
+                    .coords
+                    .get(&(right_node as usize))
+                    .expect("our right");
                 let left_our_size = test_node_size(left_node);
                 let right_our_size = test_node_size(right_node);
 
@@ -812,12 +814,8 @@ mod tests {
                     right_graphviz.center.1,
                     right_graphviz.size.1,
                 );
-                let our_vertical = axis_relation(
-                    left_ours.1,
-                    left_our_size.1,
-                    right_ours.1,
-                    right_our_size.1,
-                );
+                let our_vertical =
+                    axis_relation(left_ours.1, left_our_size.1, right_ours.1, right_our_size.1);
                 if graphviz_vertical != our_vertical {
                     vertical_mismatches += 1;
                 }
@@ -830,12 +828,8 @@ mod tests {
                         right_graphviz.center.0,
                         right_graphviz.size.0,
                     );
-                    let our_horizontal = axis_relation(
-                        left_ours.0,
-                        left_our_size.0,
-                        right_ours.0,
-                        right_our_size.0,
-                    );
+                    let our_horizontal =
+                        axis_relation(left_ours.0, left_our_size.0, right_ours.0, right_our_size.0);
                     if graphviz_horizontal != our_horizontal {
                         horizontal_mismatches += 1;
                     }
@@ -959,10 +953,24 @@ mod tests {
                 for &right_node in nodes.iter().skip(index + 1) {
                     let left_graphviz = graphviz.nodes.get(&left_node).expect("graphviz left");
                     let right_graphviz = graphviz.nodes.get(&right_node).expect("graphviz right");
-                    let left_ours = our_layout.coords.get(&(left_node as usize)).expect("our left");
-                    let right_ours = our_layout.coords.get(&(right_node as usize)).expect("our right");
-                    let left_our_size = if left_node == 0 { (100.0, 100.0) } else { (72.0, 72.0) };
-                    let right_our_size = if right_node == 0 { (100.0, 100.0) } else { (72.0, 72.0) };
+                    let left_ours = our_layout
+                        .coords
+                        .get(&(left_node as usize))
+                        .expect("our left");
+                    let right_ours = our_layout
+                        .coords
+                        .get(&(right_node as usize))
+                        .expect("our right");
+                    let left_our_size = if left_node == 0 {
+                        (100.0, 100.0)
+                    } else {
+                        (72.0, 72.0)
+                    };
+                    let right_our_size = if right_node == 0 {
+                        (100.0, 100.0)
+                    } else {
+                        (72.0, 72.0)
+                    };
 
                     let graphviz_vertical = axis_relation(
                         left_graphviz.center.1,
@@ -970,12 +978,8 @@ mod tests {
                         right_graphviz.center.1,
                         right_graphviz.size.1,
                     );
-                    let our_vertical = axis_relation(
-                        left_ours.1,
-                        left_our_size.1,
-                        right_ours.1,
-                        right_our_size.1,
-                    );
+                    let our_vertical =
+                        axis_relation(left_ours.1, left_our_size.1, right_ours.1, right_our_size.1);
                     if graphviz_vertical != our_vertical {
                         eprintln!(
                             "  vertical mismatch {left_node}-{right_node}: graphviz={graphviz_vertical:?} ours={our_vertical:?}"

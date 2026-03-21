@@ -310,8 +310,9 @@ fn merge_edge(
     x_offset: f64,
     edges: &mut Vec<EdgeLayout>,
 ) {
+    let index = *graph.edge_weight(edge.id).unwrap_or(&edge.id.index());
     edges.push(EdgeLayout {
-        index: *graph.edge_weight(edge.id).unwrap_or(&edge.id.index()),
+        index,
         points: edge
             .points
             .into_iter()

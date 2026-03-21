@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::application::Title;
-use iced::widget::{button, container, text, Column, Container};
+use iced::widget::{Column, Container, button, container, text};
 use iced::window;
 use iced::window::Screenshot;
-use iced::{border, Alignment, Background, Color, Element, Font, Length, Task, Theme};
+use iced::{Alignment, Background, Color, Element, Font, Length, Task, Theme, border};
 use iced_sugiyama::{Cluster, EdgeEndpoint, EdgeEndpointKind, Graph, Sugiyama};
 use thiserror::Error;
 
@@ -253,7 +253,12 @@ impl Moarificator {
             .edge_color(edge_colors)
             .edge_label(edge_label)
             .edge_label_element(|idx, edge, _s| {
-                edge_label(idx, edge).map(|label| text(label).font(GRAPH_FONT).into())
+                edge_label(idx, edge).map(|label| {
+                    text(label)
+                        .font(GRAPH_FONT)
+                        .color(edge_colors(idx).0)
+                        .into()
+                })
             })
             .edge_endpoint(|_, _, kind, endpoint| {
                 let marker = match kind {

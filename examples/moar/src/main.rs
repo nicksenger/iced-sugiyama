@@ -1,10 +1,17 @@
 use std::collections::HashSet;
+use std::env;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::application::Title;
 use iced::widget::{Column, Container, button, container, text};
-use iced::{Alignment, Background, Color, Font, Length, Theme, border};
+use iced::window;
+use iced::window::Screenshot;
+use iced::{Alignment, Background, Color, Element, Font, Length, Task, Theme, border};
 use iced_sugiyama::{Cluster, EdgeEndpoint, EdgeEndpointKind, Graph, Sugiyama};
+use thiserror::Error;
 
 const GRAPH_FONT: Font = Font::with_name("Times New Roman");
 const NODE_BORDER_RADIUS: f32 = 16.0;
@@ -12,14 +19,23 @@ const CLUSTER_BORDER_RADIUS: f32 = 18.0;
 const MIN_NODE_SIDE: f64 = 72.0;
 
 pub fn main() -> iced::Result {
+    let options = AppOptions::from_env();
+
     iced::application(
-        Moarificator::default(),
+        |state: &Moarificator| state.title(&()),
         Moarificator::update,
         Moarificator::view,
     )
     .theme(|_| iced::Theme::Light)
-    .window_size((800., 600.))
-    .run()
+    .run_with(move || {
+        let task = if options.headless {
+            Task::done(Message::RenderMergedPng)
+        } else {
+            Task::none()
+        };
+
+        (Moarificator::new(options.headless), task)
+    })
 }
 
 impl<S> Title<S> for Moarificator {
@@ -28,41 +44,139 @@ impl<S> Title<S> for Moarificator {
     }
 }
 
-struct Moarificator(Graph);
-impl Default for Moarificator {
-    fn default() -> Self {
-        Self(Graph {
-            nodes: vec![0, 1, 2],
-            edges: vec![(0, 1), (0, 2)],
-            config: Default::default(),
-        })
+struct Moarificator {
+    headless: bool,
+    export_in_progress: bool,
+    graph: Graph,
+    pending_graphviz_png: Option<Vec<u8>>,
+    pending_iced_screenshot: Option<Screenshot>,
+}
+impl Moarificator {
+    fn new(headless: bool) -> Self {
+        Self {
+            headless,
+            export_in_progress: false,
+            graph: initial_graph(),
+            pending_graphviz_png: None,
+            pending_iced_screenshot: None,
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
+struct AppOptions {
+    headless: bool,
+}
+
+impl AppOptions {
+    fn from_env() -> Self {
+        Self {
+            headless: env::args().skip(1).any(|arg| arg == "--headless"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 enum Message {
     Moar(u32),
-    PrintDot,
+    RenderMergedPng,
+    CaptureIcedView,
+    GraphvizPngReady(Result<Vec<u8>, String>),
+    IcedViewCaptured(Screenshot),
+    MergedPngSaved(Result<PathBuf, String>),
+}
+
+#[derive(Debug, Error)]
+enum GraphvizPngError {
+    #[error("failed to spawn graphviz dot")]
+    SpawnDot(#[source] std::io::Error),
+    #[error("failed to open dot stdin")]
+    MissingDotStdin,
+    #[error("failed to write dot input to graphviz")]
+    WriteDot(#[source] std::io::Error),
+    #[error("failed to wait for graphviz")]
+    WaitForDot(#[source] std::io::Error),
+    #[error("graphviz dot exited with status {status}: {stderr}")]
+    DotFailed { status: i32, stderr: String },
+}
+
+#[derive(Debug, Error)]
+enum MergePngError {
+    #[error("failed to determine current working directory")]
+    CurrentDirectory(#[source] std::io::Error),
+    #[error("failed to decode graphviz png")]
+    DecodeGraphviz(#[source] image::ImageError),
+    #[error("failed to create iced screenshot image buffer")]
+    InvalidIcedScreenshotBuffer,
+    #[error("failed to save merged png")]
+    SavePng(#[source] image::ImageError),
 }
 
 impl Moarificator {
-    fn update(&mut self, message: Message) {
+    fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::PrintDot => {
-                println!("{}", graph_to_dot(&self.0));
+            Message::RenderMergedPng => {
+                self.export_in_progress = true;
+                self.pending_graphviz_png = None;
+                self.pending_iced_screenshot = None;
+
+                return Task::batch([
+                    Task::perform(
+                        render_graphviz_png(self.graph.clone()),
+                        Message::GraphvizPngReady,
+                    ),
+                    Task::done(Message::CaptureIcedView),
+                ]);
+            }
+            Message::CaptureIcedView => {
+                return window::get_latest()
+                    .and_then(window::screenshot)
+                    .map(Message::IcedViewCaptured);
+            }
+            Message::GraphvizPngReady(result) => match result {
+                Ok(bytes) => {
+                    self.pending_graphviz_png = Some(bytes);
+                    return self.maybe_merge_pngs();
+                }
+                Err(error) => {
+                    self.export_in_progress = false;
+                    self.pending_graphviz_png = None;
+                    self.pending_iced_screenshot = None;
+                    eprintln!("Failed to render Graphviz PNG: {error}");
+                    if self.headless {
+                        return close_latest_window();
+                    }
+                }
+            },
+            Message::IcedViewCaptured(screenshot) => {
+                self.pending_iced_screenshot = Some(screenshot);
+                return self.maybe_merge_pngs();
+            }
+            Message::MergedPngSaved(result) => {
+                self.export_in_progress = false;
+                match result {
+                    Ok(path) => println!("Wrote {}", path.display()),
+                    Err(error) => eprintln!("Failed to save merged PNG: {error}"),
+                }
+
+                if self.headless {
+                    return close_latest_window();
+                }
             }
             Message::Moar(n) => match n {
                 0 => {
-                    let from = fastrand::choice(self.0.nodes.iter()).copied().unwrap_or(0);
-                    let to = *self.0.nodes.iter().max().unwrap_or(&0) + 1;
-                    self.0.nodes.push(to);
-                    self.0.edges.push((from, to));
+                    let from = fastrand::choice(self.graph.nodes.iter())
+                        .copied()
+                        .unwrap_or(0);
+                    let to = *self.graph.nodes.iter().max().unwrap_or(&0) + 1;
+                    self.graph.nodes.push(to);
+                    self.graph.edges.push((from, to));
                 }
 
                 n => {
                     let from = n;
                     let existing_connections = self
-                        .0
+                        .graph
                         .edges
                         .iter()
                         .filter_map(|(n, m)| {
@@ -70,7 +184,7 @@ impl Moarificator {
                         })
                         .collect::<HashSet<_>>();
                     let potential_connections = self
-                        .0
+                        .graph
                         .nodes
                         .iter()
                         .filter(|n| **n > 0 && **n != from && !existing_connections.contains(n))
@@ -78,25 +192,42 @@ impl Moarificator {
                         .collect::<Vec<_>>();
 
                     if potential_connections.is_empty() {
-                        let to = *self.0.nodes.iter().max().unwrap_or(&0) + 1;
-                        self.0.nodes.push(to);
-                        self.0.edges.push((from, to));
+                        let to = *self.graph.nodes.iter().max().unwrap_or(&0) + 1;
+                        self.graph.nodes.push(to);
+                        self.graph.edges.push((from, to));
                     }
 
                     let Some(to) = fastrand::choice(potential_connections.iter()) else {
-                        return;
+                        return Task::none();
                     };
-                    self.0.edges.push((from, *to));
+                    self.graph.edges.push((from, *to));
                 }
             },
         }
+
+        Task::none()
+    }
+
+    fn maybe_merge_pngs(&mut self) -> Task<Message> {
+        let Some(graphviz_png) = self.pending_graphviz_png.take() else {
+            return Task::none();
+        };
+        let Some(iced_screenshot) = self.pending_iced_screenshot.take() else {
+            self.pending_graphviz_png = Some(graphviz_png);
+            return Task::none();
+        };
+
+        Task::perform(
+            save_merged_png(graphviz_png, iced_screenshot),
+            Message::MergedPngSaved,
+        )
     }
 
     fn view(&self) -> Container<'_, Message> {
-        let clusters = build_clusters(&self.0);
+        let clusters = build_clusters(&self.graph);
 
         let graph = Container::new(
-            Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.0, |n| {
+            Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.graph, |n| {
                 button(
                     container(text(node_label(n)).font(GRAPH_FONT))
                         .width(Length::Fill)
@@ -153,13 +284,25 @@ impl Moarificator {
         .width(Length::Fill)
         .height(Length::Fill);
 
+        let export_button: Element<'_, Message> = if self.export_in_progress {
+            container(
+                text("Render PNG")
+                    .font(GRAPH_FONT)
+                    .color(Color::TRANSPARENT),
+            )
+            .padding([8, 16])
+            .into()
+        } else {
+            button(text("Render PNG").font(GRAPH_FONT))
+                .style(transparent_button_style)
+                .on_press(Message::RenderMergedPng)
+                .padding([8, 16])
+                .into()
+        };
+
         Container::new(
             Column::new()
-                .push(
-                    button(text("Print DOT").font(GRAPH_FONT))
-                        .style(transparent_button_style)
-                        .on_press(Message::PrintDot),
-                )
+                .push(export_button)
                 .push(graph)
                 .spacing(16)
                 .align_x(Alignment::Start)
@@ -229,6 +372,120 @@ fn graph_to_dot(graph: &Graph) -> String {
 
     dot.push_str("}\n");
     dot
+}
+
+fn initial_graph() -> Graph {
+    let mut nodes = vec![0_u32];
+    let mut edges = Vec::new();
+
+    for to in 1_u32..=6 {
+        let max_edges = usize::min(3, to as usize);
+        let edge_count = fastrand::usize(1..=max_edges);
+        let mut connected_from = HashSet::new();
+
+        while connected_from.len() < edge_count {
+            let from = fastrand::u32(0..to);
+            if connected_from.insert(from) {
+                edges.push((from, to));
+            }
+        }
+
+        nodes.push(to);
+    }
+
+    Graph {
+        nodes,
+        edges,
+        config: Default::default(),
+    }
+}
+
+fn close_latest_window() -> Task<Message> {
+    window::get_latest().then(|id| match id {
+        Some(id) => window::close(id),
+        None => Task::none(),
+    })
+}
+
+async fn render_graphviz_png(graph: Graph) -> Result<Vec<u8>, String> {
+    let dot = graph_to_dot(&graph);
+
+    let mut child = Command::new("dot")
+        .arg("-Tpng")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(GraphvizPngError::SpawnDot)
+        .map_err(|error| error.to_string())?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or(GraphvizPngError::MissingDotStdin)
+        .map_err(|error| error.to_string())?;
+    stdin
+        .write_all(dot.as_bytes())
+        .map_err(GraphvizPngError::WriteDot)
+        .map_err(|error| error.to_string())?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .map_err(GraphvizPngError::WaitForDot)
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(GraphvizPngError::DotFailed {
+            status: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+        .map_err(|error| error.to_string())
+    }
+}
+
+async fn save_merged_png(graphviz_png: Vec<u8>, screenshot: Screenshot) -> Result<PathBuf, String> {
+    let output_path = env::current_dir()
+        .map_err(MergePngError::CurrentDirectory)
+        .map_err(|error| error.to_string())?
+        .join("moar-render.png");
+
+    let graphviz_image =
+        image::load_from_memory_with_format(&graphviz_png, image::ImageFormat::Png)
+            .map_err(MergePngError::DecodeGraphviz)
+            .map_err(|error| error.to_string())?
+            .to_rgba8();
+    let iced_image = image::RgbaImage::from_raw(
+        screenshot.size.width,
+        screenshot.size.height,
+        screenshot.bytes.to_vec(),
+    )
+    .ok_or(MergePngError::InvalidIcedScreenshotBuffer)
+    .map_err(|error| error.to_string())?;
+
+    let merged_width = graphviz_image.width() + iced_image.width();
+    let merged_height = graphviz_image.height().max(iced_image.height());
+    let mut merged = image::RgbaImage::from_pixel(
+        merged_width,
+        merged_height,
+        image::Rgba([255, 255, 255, 255]),
+    );
+    image::imageops::overlay(&mut merged, &graphviz_image, 0, 0);
+    image::imageops::overlay(
+        &mut merged,
+        &iced_image,
+        i64::from(graphviz_image.width()),
+        0,
+    );
+
+    merged
+        .save(&output_path)
+        .map_err(MergePngError::SavePng)
+        .map_err(|error| error.to_string())?;
+
+    Ok(output_path)
 }
 
 fn build_clusters(graph: &Graph) -> Vec<Cluster> {

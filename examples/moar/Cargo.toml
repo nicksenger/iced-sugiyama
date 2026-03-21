@@ -12,5 +12,7 @@ animated = ["iced-sugiyama/animated"]
 
 [dependencies]
 fastrand = "2"
+image = { version = "0.24", default-features = false, features = ["png"] }
 iced.workspace = true
 iced-sugiyama = { path = "../.." }
+thiserror = "2"

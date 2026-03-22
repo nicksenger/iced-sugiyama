@@ -10,7 +10,7 @@ animated = ["dep:lyon_algorithms"]
 [dependencies]
 iced.workspace = true
 lyon_algorithms = { workspace = true, optional = true }
-rust-sugiyama.workspace = true
+rust_sugiyama.workspace = true
 petgraph = "0.8"
 
 [dev-dependencies]
@@ -20,6 +20,7 @@ serde_json = "1"
 [workspace]
 members = [
     "examples/*",
+    "core",
 ]
 
 [workspace.package]
@@ -34,5 +35,5 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 iced = { version = "0.13", features = ["advanced", "canvas", "lazy"] }
+rust_sugiyama = { package = "iced-sugiyama-core", path = "./core" }
 lyon_algorithms = "1"
-rust-sugiyama = { path = "../rust-sugiyama" }

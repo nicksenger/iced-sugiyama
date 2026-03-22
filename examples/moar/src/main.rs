@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -16,6 +17,7 @@ use iced::window::Screenshot;
 use iced::{Alignment, Background, Color, Element, Font, Length, Task, Theme, border};
 use iced::{Point, Rectangle, Vector};
 use iced_sugiyama::{Cluster, EdgeEndpointKind, Graph, Sugiyama};
+use serde_json::Value;
 use thiserror::Error;
 
 const GRAPH_FONT: Font = Font::with_name("Times New Roman");
@@ -28,6 +30,10 @@ const WINDOW_HEIGHT: f32 = 800.0;
 const DEFAULT_GRAPH_SEED: u64 = 0x5EED_5EED;
 const DEFAULT_GRAPH_NODE_COUNT: u32 = 6;
 const GRAPHVIZ_PNG_SCALE: f64 = 0.7;
+const MERGED_PNG_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-comp.png";
+const GRAPHVIZ_PLAIN_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-gviz.txt";
+const CUSTOM_LAYOUT_PLAIN_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-out.txt";
+const LAYOUT_SCORES_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-scores.txt";
 
 #[derive(Debug, Clone, Copy)]
 enum GraphvizEndpointGlyphKind {
@@ -112,6 +118,19 @@ where
 pub fn main() -> iced::Result {
     let options = AppOptions::from_env();
 
+    if options.headless && options.noimg {
+        match render_graphviz_artifacts(initial_graph(options.seed, options.node_count), false) {
+            Ok(artifacts) => {
+                println!("Wrote {}", artifacts.graphviz_plain_path.display());
+                println!("Wrote {}", artifacts.custom_plain_path.display());
+                println!("Wrote {}", artifacts.scores_path.display());
+            }
+            Err(error) => eprintln!("Failed to render Graphviz artifacts: {error}"),
+        }
+
+        return Ok(());
+    }
+
     iced::application(
         |state: &Moarificator| state.title(&()),
         Moarificator::update,
@@ -127,7 +146,12 @@ pub fn main() -> iced::Result {
         let task = Task::done(Message::AppStarted);
 
         (
-            Moarificator::new(options.headless, options.seed, options.node_count),
+            Moarificator::new(
+                options.headless,
+                options.noimg,
+                options.seed,
+                options.node_count,
+            ),
             task,
         )
     })
@@ -141,15 +165,17 @@ impl<S> Title<S> for Moarificator {
 
 struct Moarificator {
     headless: bool,
+    noimg: bool,
     export_in_progress: bool,
     graph: Graph,
     pending_graphviz_png: Option<Vec<u8>>,
     pending_iced_screenshot: Option<Screenshot>,
 }
 impl Moarificator {
-    fn new(headless: bool, seed: u64, node_count: u32) -> Self {
+    fn new(headless: bool, noimg: bool, seed: u64, node_count: u32) -> Self {
         Self {
             headless,
+            noimg,
             export_in_progress: false,
             graph: initial_graph(seed, node_count),
             pending_graphviz_png: None,
@@ -161,6 +187,7 @@ impl Moarificator {
 #[derive(Debug, Clone, Copy)]
 struct AppOptions {
     headless: bool,
+    noimg: bool,
     seed: u64,
     node_count: u32,
 }
@@ -168,6 +195,7 @@ struct AppOptions {
 impl AppOptions {
     fn from_env() -> Self {
         let mut headless = false;
+        let mut noimg = false;
         let mut seed = DEFAULT_GRAPH_SEED;
         let mut node_count = DEFAULT_GRAPH_NODE_COUNT;
         let mut args = env::args().skip(1);
@@ -175,6 +203,7 @@ impl AppOptions {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--headless" => headless = true,
+                "--noimg" => noimg = true,
                 "--seed" => {
                     let raw_seed = args
                         .next()
@@ -199,6 +228,7 @@ impl AppOptions {
 
         Self {
             headless,
+            noimg,
             seed,
             node_count,
         }
@@ -229,23 +259,55 @@ enum Message {
     Moar(u32),
     RenderMergedPng,
     CaptureIcedView,
-    GraphvizPngReady(Result<Vec<u8>, String>),
+    GraphvizArtifactsReady(Result<GraphvizArtifacts, String>),
     IcedViewCaptured(Screenshot),
     MergedPngSaved(Result<PathBuf, String>),
 }
 
+#[derive(Debug, Clone)]
+struct GraphvizArtifacts {
+    png: Option<Vec<u8>>,
+    graphviz_plain_path: PathBuf,
+    custom_plain_path: PathBuf,
+    scores_path: PathBuf,
+}
+
 #[derive(Debug, Error)]
-enum GraphvizPngError {
-    #[error("failed to spawn graphviz dot")]
-    SpawnDot(#[source] std::io::Error),
+enum GraphvizOutputError {
+    #[error("failed to spawn graphviz dot for {format} output")]
+    SpawnDot {
+        format: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to open dot stdin")]
     MissingDotStdin,
     #[error("failed to write dot input to graphviz")]
     WriteDot(#[source] std::io::Error),
     #[error("failed to wait for graphviz")]
     WaitForDot(#[source] std::io::Error),
-    #[error("graphviz dot exited with status {status}: {stderr}")]
-    DotFailed { status: i32, stderr: String },
+    #[error("graphviz dot exited with status {status} while rendering {format}: {stderr}")]
+    DotFailed {
+        format: &'static str,
+        status: i32,
+        stderr: String,
+    },
+    #[error("failed to save graphviz plain output")]
+    SavePlain(#[source] std::io::Error),
+    #[error("failed to save custom layout plain output")]
+    SaveCustomPlain(#[source] std::io::Error),
+    #[error("failed to save layout scores output")]
+    SaveScores(#[source] std::io::Error),
+    #[error("failed to parse graphviz json output")]
+    ParseJson(#[source] serde_json::Error),
+    #[error("graphviz json output missing {field}")]
+    MissingJsonField { field: &'static str },
+    #[error("graphviz json output has invalid {field}")]
+    InvalidJsonField { field: &'static str },
+    #[error("failed to parse plain layout output")]
+    ParsePlainOutput,
+    #[error("invalid plain layout output")]
+    InvalidPlainOutput,
 }
 
 #[derive(Debug, Error)]
@@ -278,29 +340,44 @@ impl Moarificator {
                 self.pending_graphviz_png = None;
                 self.pending_iced_screenshot = None;
 
-                return Task::batch([
-                    Task::perform(
-                        render_graphviz_png(self.graph.clone()),
-                        Message::GraphvizPngReady,
-                    ),
-                    Task::done(Message::CaptureIcedView),
-                ]);
+                let include_png = !(self.headless && self.noimg);
+                let graph = self.graph.clone();
+                let render = Task::perform(
+                    async move { render_graphviz_artifacts(graph, include_png) },
+                    Message::GraphvizArtifactsReady,
+                );
+
+                if include_png {
+                    return Task::batch([render, Task::done(Message::CaptureIcedView)]);
+                }
+
+                return render;
             }
             Message::CaptureIcedView => {
                 return window::get_latest()
                     .and_then(window::screenshot)
                     .map(Message::IcedViewCaptured);
             }
-            Message::GraphvizPngReady(result) => match result {
-                Ok(bytes) => {
-                    self.pending_graphviz_png = Some(bytes);
-                    return self.maybe_merge_pngs();
+            Message::GraphvizArtifactsReady(result) => match result {
+                Ok(artifacts) => {
+                    println!("Wrote {}", artifacts.graphviz_plain_path.display());
+                    println!("Wrote {}", artifacts.custom_plain_path.display());
+                    println!("Wrote {}", artifacts.scores_path.display());
+                    if let Some(png) = artifacts.png {
+                        self.pending_graphviz_png = Some(png);
+                        return self.maybe_merge_pngs();
+                    }
+
+                    self.export_in_progress = false;
+                    if self.headless {
+                        return close_latest_window();
+                    }
                 }
                 Err(error) => {
                     self.export_in_progress = false;
                     self.pending_graphviz_png = None;
                     self.pending_iced_screenshot = None;
-                    eprintln!("Failed to render Graphviz PNG: {error}");
+                    eprintln!("Failed to render Graphviz artifacts: {error}");
                     if self.headless {
                         return close_latest_window();
                     }
@@ -425,13 +502,7 @@ impl Moarificator {
             .edge_corner_radius(8.0)
             .edge_endpoint_extension(0.0)
             .clusters(clusters)
-            .render_config(rust_sugiyama::advanced::RenderConfig {
-                routing_padding: 4.0,
-                bend_penalty: 6.0,
-                cluster_padding: 10.0,
-                cluster_constraint_iterations: 4,
-                cluster_boundary_gap: 8.0,
-            })
+            .render_config(render_config())
             .cluster_container(|idx, cluster| {
                 Some(
                     container(
@@ -597,47 +668,856 @@ fn close_latest_window() -> Task<Message> {
     })
 }
 
-async fn render_graphviz_png(graph: Graph) -> Result<Vec<u8>, String> {
-    let dot = graph_to_dot(&graph);
-
+fn run_graphviz(dot: &str, format: &'static str) -> Result<Vec<u8>, GraphvizOutputError> {
     let mut child = Command::new("dot")
-        .arg("-Tpng")
+        .arg(format!("-T{format}"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(GraphvizPngError::SpawnDot)
-        .map_err(|error| error.to_string())?;
+        .map_err(|source| GraphvizOutputError::SpawnDot { format, source })?;
 
     let mut stdin = child
         .stdin
         .take()
-        .ok_or(GraphvizPngError::MissingDotStdin)
-        .map_err(|error| error.to_string())?;
+        .ok_or(GraphvizOutputError::MissingDotStdin)?;
     stdin
         .write_all(dot.as_bytes())
-        .map_err(GraphvizPngError::WriteDot)
-        .map_err(|error| error.to_string())?;
+        .map_err(GraphvizOutputError::WriteDot)?;
     drop(stdin);
 
     let output = child
         .wait_with_output()
-        .map_err(GraphvizPngError::WaitForDot)
-        .map_err(|error| error.to_string())?;
+        .map_err(GraphvizOutputError::WaitForDot)?;
 
     if output.status.success() {
         Ok(output.stdout)
     } else {
-        Err(GraphvizPngError::DotFailed {
+        Err(GraphvizOutputError::DotFailed {
+            format,
             status: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
-        .map_err(|error| error.to_string())
     }
 }
 
+fn render_graphviz_artifacts(graph: Graph, include_png: bool) -> Result<GraphvizArtifacts, String> {
+    let dot = graph_to_dot(&graph);
+    let clusters = build_clusters(&graph);
+    let png = if include_png {
+        Some(run_graphviz(&dot, "png").map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
+    let graphviz_json = run_graphviz(&dot, "json0").map_err(|error| error.to_string())?;
+    let graphviz_plain_path = PathBuf::from(GRAPHVIZ_PLAIN_OUTPUT_PATH);
+    let custom_plain_path = PathBuf::from(CUSTOM_LAYOUT_PLAIN_OUTPUT_PATH);
+    let scores_path = PathBuf::from(LAYOUT_SCORES_OUTPUT_PATH);
+    let custom_plain = iced_sugiyama::graphviz_plain_layout(
+        &graph.nodes,
+        &graph.edges,
+        &graph.config,
+        node_size,
+        node_label,
+        edge_label,
+        &clusters,
+        &render_config(),
+        cluster_label,
+    );
+    let graphviz_plain =
+        graphviz_json_to_plain(&graphviz_json).map_err(|error| error.to_string())?;
+    let scores =
+        compare_plain_layouts(&graphviz_plain, &custom_plain).map_err(|error| error.to_string())?;
+
+    fs::write(&graphviz_plain_path, graphviz_plain)
+        .map_err(GraphvizOutputError::SavePlain)
+        .map_err(|error| error.to_string())?;
+    fs::write(&custom_plain_path, custom_plain)
+        .map_err(GraphvizOutputError::SaveCustomPlain)
+        .map_err(|error| error.to_string())?;
+    fs::write(&scores_path, scores.to_line())
+        .map_err(GraphvizOutputError::SaveScores)
+        .map_err(|error| error.to_string())?;
+
+    Ok(GraphvizArtifacts {
+        png,
+        graphviz_plain_path,
+        custom_plain_path,
+        scores_path,
+    })
+}
+
+fn graphviz_json_to_plain(json_bytes: &[u8]) -> Result<String, GraphvizOutputError> {
+    fn json_string<'a>(
+        value: &'a Value,
+        field: &'static str,
+    ) -> Result<&'a str, GraphvizOutputError> {
+        value
+            .as_str()
+            .ok_or(GraphvizOutputError::MissingJsonField { field })
+    }
+
+    fn json_u64(value: &Value, field: &'static str) -> Result<u64, GraphvizOutputError> {
+        value
+            .as_u64()
+            .ok_or(GraphvizOutputError::MissingJsonField { field })
+    }
+
+    fn parse_point(value: &str) -> Result<(f64, f64), GraphvizOutputError> {
+        let mut parts = value.split(',');
+        let x = parts
+            .next()
+            .ok_or(GraphvizOutputError::InvalidJsonField { field: "point" })?
+            .parse::<f64>()
+            .map_err(|_| GraphvizOutputError::InvalidJsonField { field: "point" })?;
+        let y = parts
+            .next()
+            .ok_or(GraphvizOutputError::InvalidJsonField { field: "point" })?
+            .parse::<f64>()
+            .map_err(|_| GraphvizOutputError::InvalidJsonField { field: "point" })?;
+        Ok((x, y))
+    }
+
+    fn parse_bb(value: &str) -> Result<(f64, f64, f64, f64), GraphvizOutputError> {
+        let mut parts = value.split(',');
+        let min_x = parts
+            .next()
+            .ok_or(GraphvizOutputError::InvalidJsonField { field: "bb" })?
+            .parse::<f64>()
+            .map_err(|_| GraphvizOutputError::InvalidJsonField { field: "bb" })?;
+        let min_y = parts
+            .next()
+            .ok_or(GraphvizOutputError::InvalidJsonField { field: "bb" })?
+            .parse::<f64>()
+            .map_err(|_| GraphvizOutputError::InvalidJsonField { field: "bb" })?;
+        let max_x = parts
+            .next()
+            .ok_or(GraphvizOutputError::InvalidJsonField { field: "bb" })?
+            .parse::<f64>()
+            .map_err(|_| GraphvizOutputError::InvalidJsonField { field: "bb" })?;
+        let max_y = parts
+            .next()
+            .ok_or(GraphvizOutputError::InvalidJsonField { field: "bb" })?
+            .parse::<f64>()
+            .map_err(|_| GraphvizOutputError::InvalidJsonField { field: "bb" })?;
+        Ok((min_x, min_y, max_x, max_y))
+    }
+
+    fn parse_edge_points(value: &str) -> Result<Vec<(f64, f64)>, GraphvizOutputError> {
+        value
+            .split_whitespace()
+            .filter_map(|token| {
+                let trimmed = token
+                    .strip_prefix("s,")
+                    .or_else(|| token.strip_prefix("e,"))
+                    .unwrap_or(token);
+                trimmed.contains(',').then_some(trimmed)
+            })
+            .map(parse_point)
+            .collect()
+    }
+
+    fn format_number(value: f64) -> String {
+        let mut text = format!("{value:.5}");
+        while text.contains('.') && text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+        text
+    }
+
+    fn format_label(value: &str) -> String {
+        let simple = !value.is_empty()
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'));
+        if simple {
+            value.to_string()
+        } else {
+            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+    }
+
+    #[derive(Clone)]
+    struct GraphvizCluster {
+        index: usize,
+        gvid: u64,
+        label: String,
+        bounds: (f64, f64, f64, f64),
+        child_gvids: Vec<u64>,
+        parent: Option<usize>,
+    }
+
+    #[derive(Clone)]
+    struct GraphvizNode {
+        id: u32,
+        center: (f64, f64),
+        size: (f64, f64),
+        label: String,
+    }
+
+    #[derive(Clone)]
+    struct GraphvizEdge {
+        tail: u32,
+        head: u32,
+        points: Vec<(f64, f64)>,
+        label: Option<String>,
+        label_position: Option<(f64, f64)>,
+    }
+
+    const POINTS_PER_INCH: f64 = 72.0;
+
+    let json: Value = serde_json::from_slice(json_bytes).map_err(GraphvizOutputError::ParseJson)?;
+    let (_, _, max_x, max_y) = parse_bb(json_string(&json["bb"], "bb")?)?;
+    let objects = json["objects"]
+        .as_array()
+        .ok_or(GraphvizOutputError::MissingJsonField { field: "objects" })?;
+    let mut clusters = Vec::new();
+    let mut nodes = Vec::new();
+    let mut node_ids_by_gvid = std::collections::HashMap::new();
+
+    for object in objects {
+        let name = json_string(&object["name"], "objects[].name")?;
+        let gvid = json_u64(&object["_gvid"], "objects[]._gvid")?;
+
+        if let Some(suffix) = name.strip_prefix("cluster_") {
+            let index =
+                suffix
+                    .parse::<usize>()
+                    .map_err(|_| GraphvizOutputError::InvalidJsonField {
+                        field: "objects[].name",
+                    })?;
+            let bounds = parse_bb(json_string(&object["bb"], "objects[].bb")?)?;
+            let child_gvids = object["subgraphs"]
+                .as_array()
+                .map(|subgraphs| {
+                    subgraphs
+                        .iter()
+                        .map(|child| json_u64(child, "objects[].subgraphs[]"))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let label = object["label"].as_str().unwrap_or_default().to_string();
+            clusters.push(GraphvizCluster {
+                index,
+                gvid,
+                label,
+                bounds,
+                child_gvids,
+                parent: None,
+            });
+            continue;
+        }
+
+        let Ok(id) = name.parse::<u32>() else {
+            continue;
+        };
+        let center = parse_point(json_string(&object["pos"], "objects[].pos")?)?;
+        let width = json_string(&object["width"], "objects[].width")?
+            .parse::<f64>()
+            .map_err(|_| GraphvizOutputError::InvalidJsonField {
+                field: "objects[].width",
+            })?;
+        let height = json_string(&object["height"], "objects[].height")?
+            .parse::<f64>()
+            .map_err(|_| GraphvizOutputError::InvalidJsonField {
+                field: "objects[].height",
+            })?;
+        node_ids_by_gvid.insert(gvid, id);
+        nodes.push(GraphvizNode {
+            id,
+            center: (center.0, center.1),
+            size: (width, height),
+            label: object["label"].as_str().unwrap_or(name).to_string(),
+        });
+    }
+
+    let cluster_index_by_gvid = clusters
+        .iter()
+        .enumerate()
+        .map(|(position, cluster)| (cluster.gvid, position))
+        .collect::<std::collections::HashMap<_, _>>();
+    for parent_position in 0..clusters.len() {
+        let parent_index = clusters[parent_position].index;
+        let child_positions = clusters[parent_position]
+            .child_gvids
+            .iter()
+            .filter_map(|gvid| cluster_index_by_gvid.get(gvid).copied())
+            .collect::<Vec<_>>();
+        for child_position in child_positions {
+            clusters[child_position].parent = Some(parent_index);
+        }
+    }
+
+    let mut edges = Vec::new();
+    for edge in json["edges"]
+        .as_array()
+        .ok_or(GraphvizOutputError::MissingJsonField { field: "edges" })?
+    {
+        let tail_gvid = json_u64(&edge["tail"], "edges[].tail")?;
+        let head_gvid = json_u64(&edge["head"], "edges[].head")?;
+        let tail = node_ids_by_gvid.get(&tail_gvid).copied().ok_or(
+            GraphvizOutputError::InvalidJsonField {
+                field: "edges[].tail",
+            },
+        )?;
+        let head = node_ids_by_gvid.get(&head_gvid).copied().ok_or(
+            GraphvizOutputError::InvalidJsonField {
+                field: "edges[].head",
+            },
+        )?;
+        let points = parse_edge_points(json_string(&edge["pos"], "edges[].pos")?)?;
+        let label = edge["label"].as_str().map(str::to_string);
+        let label_position = edge["lp"].as_str().map(parse_point).transpose()?;
+        edges.push(GraphvizEdge {
+            tail,
+            head,
+            points,
+            label,
+            label_position,
+        });
+    }
+
+    let mut plain = String::new();
+    plain.push_str(&format!(
+        "graph 1 {} {}\n",
+        format_number(max_x / POINTS_PER_INCH),
+        format_number(max_y / POINTS_PER_INCH)
+    ));
+
+    clusters.sort_by_key(|cluster| cluster.index);
+    for cluster in clusters {
+        plain.push_str(&format!(
+            "cluster {} {} {} {} {} {} {}\n",
+            cluster.index,
+            cluster
+                .parent
+                .map(|parent| parent.to_string())
+                .unwrap_or_else(|| "_".to_string()),
+            format_number(cluster.bounds.0 / POINTS_PER_INCH),
+            format_number(cluster.bounds.1 / POINTS_PER_INCH),
+            format_number(cluster.bounds.2 / POINTS_PER_INCH),
+            format_number(cluster.bounds.3 / POINTS_PER_INCH),
+            format_label(&cluster.label)
+        ));
+    }
+
+    for node in nodes {
+        plain.push_str(&format!(
+            "node {} {} {} {} {} {}\n",
+            node.id,
+            format_number(node.center.0 / POINTS_PER_INCH),
+            format_number(node.center.1 / POINTS_PER_INCH),
+            format_number(node.size.0),
+            format_number(node.size.1),
+            format_label(&node.label)
+        ));
+    }
+
+    for edge in edges {
+        plain.push_str(&format!(
+            "edge {} {} {}",
+            edge.tail,
+            edge.head,
+            edge.points.len()
+        ));
+        for point in edge.points {
+            plain.push_str(&format!(
+                " {} {}",
+                format_number(point.0 / POINTS_PER_INCH),
+                format_number(point.1 / POINTS_PER_INCH)
+            ));
+        }
+        if let (Some(label), Some((x, y))) = (edge.label, edge.label_position) {
+            plain.push_str(&format!(
+                " {} {} {}",
+                format_label(&label),
+                format_number(x / POINTS_PER_INCH),
+                format_number(y / POINTS_PER_INCH)
+            ));
+        }
+        plain.push('\n');
+    }
+
+    plain.push_str("stop\n");
+    Ok(plain)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SimilarityScores {
+    nodes: f64,
+    edges: f64,
+    clusters: f64,
+    overall: f64,
+}
+
+impl SimilarityScores {
+    fn to_line(self) -> String {
+        format!(
+            "nodes: {:.2}, edges: {:.2}, clusters: {:.2}, overall: {:.2}\n",
+            self.nodes, self.edges, self.clusters, self.overall
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedPlainLayout {
+    width: f64,
+    height: f64,
+    nodes: HashMap<u32, PlainNode>,
+    edges: HashMap<(u32, u32), PlainEdge>,
+    clusters: HashMap<usize, PlainCluster>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlainNode {
+    center: (f64, f64),
+    size: (f64, f64),
+}
+
+#[derive(Debug, Clone)]
+struct PlainEdge {
+    points: Vec<(f64, f64)>,
+    label_position: Option<(f64, f64)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlainCluster {
+    parent: Option<usize>,
+    bounds: (f64, f64, f64, f64),
+}
+
+fn compare_plain_layouts(left: &str, right: &str) -> Result<SimilarityScores, GraphvizOutputError> {
+    let left = parse_plain_layout(left)?;
+    let right = parse_plain_layout(right)?;
+    let diagonal = left
+        .width
+        .max(right.width)
+        .hypot(left.height.max(right.height))
+        .max(1.0);
+
+    let nodes = node_similarity(&left, &right, diagonal);
+    let edges = edge_similarity(&left, &right, diagonal);
+    let clusters = cluster_similarity(&left, &right);
+    let overall = (nodes + edges + clusters) / 3.0;
+
+    Ok(SimilarityScores {
+        nodes,
+        edges,
+        clusters,
+        overall,
+    })
+}
+
+fn parse_plain_layout(input: &str) -> Result<ParsedPlainLayout, GraphvizOutputError> {
+    let mut layout = ParsedPlainLayout {
+        width: 0.0,
+        height: 0.0,
+        nodes: HashMap::new(),
+        edges: HashMap::new(),
+        clusters: HashMap::new(),
+    };
+
+    for line in input.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let tokens = tokenize_plain_line(line)?;
+        if tokens.is_empty() {
+            continue;
+        }
+
+        match tokens[0].as_str() {
+            "graph" => {
+                if tokens.len() < 4 {
+                    return Err(GraphvizOutputError::InvalidPlainOutput);
+                }
+                layout.width = parse_plain_f64(&tokens[2])?;
+                layout.height = parse_plain_f64(&tokens[3])?;
+            }
+            "cluster" => {
+                if tokens.len() < 7 {
+                    return Err(GraphvizOutputError::InvalidPlainOutput);
+                }
+                let index = parse_plain_usize(&tokens[1])?;
+                let parent = match tokens[2].as_str() {
+                    "_" => None,
+                    value => Some(parse_plain_usize(value)?),
+                };
+                layout.clusters.insert(
+                    index,
+                    PlainCluster {
+                        parent,
+                        bounds: (
+                            parse_plain_f64(&tokens[3])?,
+                            parse_plain_f64(&tokens[4])?,
+                            parse_plain_f64(&tokens[5])?,
+                            parse_plain_f64(&tokens[6])?,
+                        ),
+                    },
+                );
+            }
+            "node" => {
+                if tokens.len() < 6 {
+                    return Err(GraphvizOutputError::InvalidPlainOutput);
+                }
+                let id = parse_plain_u32(&tokens[1])?;
+                layout.nodes.insert(
+                    id,
+                    PlainNode {
+                        center: (parse_plain_f64(&tokens[2])?, parse_plain_f64(&tokens[3])?),
+                        size: (parse_plain_f64(&tokens[4])?, parse_plain_f64(&tokens[5])?),
+                    },
+                );
+            }
+            "edge" => {
+                if tokens.len() < 4 {
+                    return Err(GraphvizOutputError::InvalidPlainOutput);
+                }
+                let tail = parse_plain_u32(&tokens[1])?;
+                let head = parse_plain_u32(&tokens[2])?;
+                let count = parse_plain_usize(&tokens[3])?;
+                let coords_end = 4 + count.saturating_mul(2);
+                if tokens.len() < coords_end {
+                    return Err(GraphvizOutputError::InvalidPlainOutput);
+                }
+                let mut points = Vec::with_capacity(count);
+                for index in 0..count {
+                    let token_index = 4 + index * 2;
+                    points.push((
+                        parse_plain_f64(&tokens[token_index])?,
+                        parse_plain_f64(&tokens[token_index + 1])?,
+                    ));
+                }
+                let remaining = &tokens[coords_end..];
+                let label_position = match remaining.len() {
+                    0 => None,
+                    3 => Some((
+                        parse_plain_f64(&remaining[1])?,
+                        parse_plain_f64(&remaining[2])?,
+                    )),
+                    _ => return Err(GraphvizOutputError::InvalidPlainOutput),
+                };
+                layout.edges.insert(
+                    (tail, head),
+                    PlainEdge {
+                        points,
+                        label_position,
+                    },
+                );
+            }
+            "stop" => break,
+            _ => {}
+        }
+    }
+
+    Ok(layout)
+}
+
+fn tokenize_plain_line(line: &str) -> Result<Vec<String>, GraphvizOutputError> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+    let mut escaping = false;
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if escaping {
+                current.push(ch);
+                escaping = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaping = true,
+                '"' => {
+                    tokens.push(current.clone());
+                    current.clear();
+                    in_quotes = false;
+                }
+                _ => current.push(ch),
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                in_quotes = true;
+            }
+            ch if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaping || in_quotes {
+        return Err(GraphvizOutputError::ParsePlainOutput);
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
+}
+
+fn parse_plain_u32(value: &str) -> Result<u32, GraphvizOutputError> {
+    value
+        .parse::<u32>()
+        .map_err(|_| GraphvizOutputError::ParsePlainOutput)
+}
+
+fn parse_plain_usize(value: &str) -> Result<usize, GraphvizOutputError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| GraphvizOutputError::ParsePlainOutput)
+}
+
+fn parse_plain_f64(value: &str) -> Result<f64, GraphvizOutputError> {
+    value
+        .parse::<f64>()
+        .map_err(|_| GraphvizOutputError::ParsePlainOutput)
+}
+
+fn node_similarity(left: &ParsedPlainLayout, right: &ParsedPlainLayout, diagonal: f64) -> f64 {
+    let node_ids = left
+        .nodes
+        .keys()
+        .chain(right.nodes.keys())
+        .copied()
+        .collect::<HashSet<_>>();
+
+    if node_ids.is_empty() {
+        return 1.0;
+    }
+
+    let total = node_ids
+        .into_iter()
+        .map(
+            |node_id| match (left.nodes.get(&node_id), right.nodes.get(&node_id)) {
+                (Some(left_node), Some(right_node)) => {
+                    let center_distance = point_distance(left_node.center, right_node.center);
+                    clamp01(1.0 - center_distance / diagonal)
+                }
+                _ => 0.0,
+            },
+        )
+        .sum::<f64>();
+
+    total
+        / (left
+            .nodes
+            .keys()
+            .chain(right.nodes.keys())
+            .collect::<HashSet<_>>()
+            .len()
+            .max(1) as f64)
+}
+
+fn edge_similarity(left: &ParsedPlainLayout, right: &ParsedPlainLayout, diagonal: f64) -> f64 {
+    let edge_ids = left
+        .edges
+        .keys()
+        .chain(right.edges.keys())
+        .copied()
+        .collect::<HashSet<_>>();
+
+    if edge_ids.is_empty() {
+        return 1.0;
+    }
+
+    let total = edge_ids
+        .into_iter()
+        .map(
+            |edge_id| match (left.edges.get(&edge_id), right.edges.get(&edge_id)) {
+                (Some(left_edge), Some(right_edge)) => {
+                    let path_score =
+                        polyline_similarity(&left_edge.points, &right_edge.points, diagonal);
+                    let label_score = match (left_edge.label_position, right_edge.label_position) {
+                        (Some(left_pos), Some(right_pos)) => {
+                            clamp01(1.0 - point_distance(left_pos, right_pos) / diagonal)
+                        }
+                        (None, None) => 1.0,
+                        _ => 0.0,
+                    };
+                    (path_score + label_score) * 0.5
+                }
+                _ => 0.0,
+            },
+        )
+        .sum::<f64>();
+
+    total
+        / (left
+            .edges
+            .keys()
+            .chain(right.edges.keys())
+            .collect::<HashSet<_>>()
+            .len()
+            .max(1) as f64)
+}
+
+fn cluster_similarity(left: &ParsedPlainLayout, right: &ParsedPlainLayout) -> f64 {
+    let cluster_ids = left
+        .clusters
+        .keys()
+        .chain(right.clusters.keys())
+        .copied()
+        .collect::<HashSet<_>>();
+
+    if cluster_ids.is_empty() {
+        return 1.0;
+    }
+
+    let total = cluster_ids
+        .into_iter()
+        .map(|cluster_id| {
+            match (
+                left.clusters.get(&cluster_id),
+                right.clusters.get(&cluster_id),
+            ) {
+                (Some(left_cluster), Some(right_cluster)) => {
+                    let bounds_score = rect_iou(left_cluster.bounds, right_cluster.bounds);
+                    let parent_score = if left_cluster.parent == right_cluster.parent {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    bounds_score * 0.8 + parent_score * 0.2
+                }
+                _ => 0.0,
+            }
+        })
+        .sum::<f64>();
+
+    total
+        / (left
+            .clusters
+            .keys()
+            .chain(right.clusters.keys())
+            .collect::<HashSet<_>>()
+            .len()
+            .max(1) as f64)
+}
+
+fn polyline_similarity(left: &[(f64, f64)], right: &[(f64, f64)], diagonal: f64) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 1.0;
+    }
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+
+    let sample_count = 24;
+    let left_samples = resample_polyline(left, sample_count);
+    let right_samples = resample_polyline(right, sample_count);
+    let mean_distance = left_samples
+        .iter()
+        .zip(right_samples.iter())
+        .map(|(left_point, right_point)| point_distance(*left_point, *right_point))
+        .sum::<f64>()
+        / sample_count as f64;
+    let shape_score = clamp01(1.0 - mean_distance / diagonal);
+    let length_score = relative_similarity(polyline_length(left), polyline_length(right));
+    shape_score * 0.8 + length_score * 0.2
+}
+
+fn resample_polyline(points: &[(f64, f64)], samples: usize) -> Vec<(f64, f64)> {
+    if points.is_empty() {
+        return vec![(0.0, 0.0); samples];
+    }
+    if points.len() == 1 {
+        return vec![points[0]; samples];
+    }
+
+    let total_length = polyline_length(points);
+    if total_length <= f64::EPSILON {
+        return vec![points[0]; samples];
+    }
+
+    let mut result = Vec::with_capacity(samples);
+    for sample_index in 0..samples {
+        let target = if samples == 1 {
+            0.0
+        } else {
+            total_length * sample_index as f64 / (samples - 1) as f64
+        };
+        result.push(point_at_distance(points, target));
+    }
+    result
+}
+
+fn point_at_distance(points: &[(f64, f64)], target: f64) -> (f64, f64) {
+    let mut traversed = 0.0;
+
+    for segment in points.windows(2) {
+        let start = segment[0];
+        let end = segment[1];
+        let length = point_distance(start, end);
+        if length <= f64::EPSILON {
+            continue;
+        }
+        if traversed + length >= target {
+            let t = (target - traversed) / length;
+            return (
+                start.0 + (end.0 - start.0) * t,
+                start.1 + (end.1 - start.1) * t,
+            );
+        }
+        traversed += length;
+    }
+
+    points.last().copied().unwrap_or((0.0, 0.0))
+}
+
+fn polyline_length(points: &[(f64, f64)]) -> f64 {
+    points
+        .windows(2)
+        .map(|segment| point_distance(segment[0], segment[1]))
+        .sum()
+}
+
+fn rect_iou(left: (f64, f64, f64, f64), right: (f64, f64, f64, f64)) -> f64 {
+    let overlap_min_x = left.0.max(right.0);
+    let overlap_min_y = left.1.max(right.1);
+    let overlap_max_x = left.2.min(right.2);
+    let overlap_max_y = left.3.min(right.3);
+    let overlap_width = (overlap_max_x - overlap_min_x).max(0.0);
+    let overlap_height = (overlap_max_y - overlap_min_y).max(0.0);
+    let intersection = overlap_width * overlap_height;
+    let left_area = (left.2 - left.0).max(0.0) * (left.3 - left.1).max(0.0);
+    let right_area = (right.2 - right.0).max(0.0) * (right.3 - right.1).max(0.0);
+    let union = left_area + right_area - intersection;
+
+    if union <= f64::EPSILON {
+        1.0
+    } else {
+        clamp01(intersection / union)
+    }
+}
+
+fn point_distance(left: (f64, f64), right: (f64, f64)) -> f64 {
+    (left.0 - right.0).hypot(left.1 - right.1)
+}
+
+fn relative_similarity(left: f64, right: f64) -> f64 {
+    let denom = left.abs().max(right.abs()).max(1.0);
+    clamp01(1.0 - (left - right).abs() / denom)
+}
+
+fn clamp01(value: f64) -> f64 {
+    value.clamp(0.0, 1.0)
+}
+
 async fn save_merged_png(graphviz_png: Vec<u8>, screenshot: Screenshot) -> Result<PathBuf, String> {
-    let output_path = PathBuf::from("/tmp/moar-render.png");
+    let output_path = PathBuf::from(MERGED_PNG_OUTPUT_PATH);
 
     let graphviz_image =
         image::load_from_memory_with_format(&graphviz_png, image::ImageFormat::Png)
@@ -746,6 +1626,16 @@ fn node_label(node: u32) -> String {
 fn edge_label(index: usize, (from, to): (u32, u32)) -> Option<String> {
     let _ = index;
     Some(format!("{from} -> {to}"))
+}
+
+fn render_config() -> rust_sugiyama::advanced::RenderConfig {
+    rust_sugiyama::advanced::RenderConfig {
+        routing_padding: 4.0,
+        bend_penalty: 6.0,
+        cluster_padding: 10.0,
+        cluster_constraint_iterations: 4,
+        cluster_boundary_gap: 8.0,
+    }
 }
 
 fn cluster_label(index: usize, cluster: &Cluster) -> String {
@@ -884,4 +1774,61 @@ fn dot_escape(value: &str) -> String {
 fn color_to_hex(color: iced::Color) -> String {
     let [r, g, b, a] = color.into_rgba8();
     format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_plain_layouts;
+
+    const BASE_LAYOUT: &str = r#"graph 1 4 4
+cluster 0 _ 0.5 0.5 3.5 3.5 "cluster 0"
+node 0 1 3 1 1 A
+node 1 3 1 1 1 B
+edge 0 1 3 1 3 2 2 3 1 "0 -> 1" 2 2
+stop
+"#;
+
+    const PERTURBED_LAYOUT: &str = r#"graph 1 4 4
+cluster 0 _ 0.55 0.5 3.45 3.45 "cluster 0"
+node 0 1 3 1 1 A
+node 1 2.85 1.1 1 1 B
+edge 0 1 3 1 3 2.1 2.05 2.95 1.05 "0 -> 1" 2.05 1.95
+stop
+"#;
+
+    #[test]
+    fn identical_layouts_score_perfectly() {
+        let scores = compare_plain_layouts(BASE_LAYOUT, BASE_LAYOUT).expect("scores");
+
+        assert!((scores.nodes - 1.0).abs() < 1e-9);
+        assert!((scores.edges - 1.0).abs() < 1e-9);
+        assert!((scores.clusters - 1.0).abs() < 1e-9);
+        assert!((scores.overall - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn small_perturbations_keep_scores_high() {
+        let scores = compare_plain_layouts(BASE_LAYOUT, PERTURBED_LAYOUT).expect("scores");
+
+        assert!(
+            scores.nodes < 1.0 && scores.nodes > 0.9,
+            "nodes={}",
+            scores.nodes
+        );
+        assert!(
+            scores.edges < 1.0 && scores.edges > 0.9,
+            "edges={}",
+            scores.edges
+        );
+        assert!(
+            scores.clusters < 1.0 && scores.clusters > 0.9,
+            "clusters={}",
+            scores.clusters
+        );
+        assert!(
+            scores.overall < 1.0 && scores.overall > 0.9,
+            "overall={}",
+            scores.overall
+        );
+    }
 }

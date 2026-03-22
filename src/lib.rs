@@ -1,4 +1,5 @@
 mod layout_engine;
+pub use layout_engine::graphviz_plain_layout;
 
 #[cfg(feature = "animated")]
 mod animated;

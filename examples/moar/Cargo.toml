@@ -14,6 +14,7 @@ animated = ["iced-sugiyama/animated"]
 fastrand = "2"
 image = { version = "0.24", default-features = false, features = ["png"] }
 iced.workspace = true
+serde_json = "1"
 rust_sugiyama.workspace = true
 iced-sugiyama = { path = "../.." }
 thiserror = "2"

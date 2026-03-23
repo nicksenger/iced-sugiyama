@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 use rust_sugiyama::advanced::{
-    ClusterSpec, DetailedLayout, RenderConfig, RoutedEdge, RoutedNode, from_graph_with_features,
+    from_graph_with_features, ClusterSpec, DetailedLayout, RenderConfig, RoutedEdge, RoutedNode,
 };
 
 const DEFAULT_NODE_SIZE: (f64, f64) = (56.0, 32.0);
@@ -497,7 +497,7 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{Cluster, compute_layout};
+    use super::{compute_layout, Cluster};
     use rust_sugiyama::configure::RankingType;
 
     const DEFAULT_GRAPH_SEED: u64 = 0x5EED_5EED;

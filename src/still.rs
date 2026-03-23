@@ -11,10 +11,10 @@ use std::rc::Rc;
 use iced::advanced::widget::{Operation, Tree, Widget};
 use iced::widget::canvas::{self, Path};
 use iced::widget::{Component, Lazy, Stack};
-use iced::{Color, Element, Length, Padding, Point, Size, Vector, event};
+use iced::{event, Color, Element, Length, Padding, Point, Size, Vector};
 
+use crate::layout_engine::{compute_layout, layout_signature, GraphLayout};
 pub use crate::layout_engine::{Cluster, EdgeEndpoint, EdgeEndpointKind};
-use crate::layout_engine::{GraphLayout, compute_layout, layout_signature};
 
 #[derive(Clone)]
 pub struct Graph {
@@ -207,11 +207,11 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     pub fn edge_label_element(
         mut self,
         f: impl Fn(
-            usize,
-            (u32, u32),
-            Option<&str>,
-        ) -> Option<Element<'static, Message, Theme, Renderer>>
-        + 'a,
+                usize,
+                (u32, u32),
+                Option<&str>,
+            ) -> Option<Element<'static, Message, Theme, Renderer>>
+            + 'a,
     ) -> Self {
         self.edge_label_element = Box::new(f);
         self
@@ -220,12 +220,12 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     pub fn edge_endpoint(
         mut self,
         f: impl Fn(
-            usize,
-            (u32, u32),
-            EdgeEndpointKind,
-            EdgeEndpoint,
-        ) -> Option<Element<'static, Message, Theme, Renderer>>
-        + 'a,
+                usize,
+                (u32, u32),
+                EdgeEndpointKind,
+                EdgeEndpoint,
+            ) -> Option<Element<'static, Message, Theme, Renderer>>
+            + 'a,
     ) -> Self {
         self.edge_endpoint = Box::new(f);
         self

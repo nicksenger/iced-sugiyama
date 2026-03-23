@@ -781,12 +781,14 @@ mod tests {
             .spawn()
             .expect("spawn dot");
 
-        child
+        let mut stdin = child
             .stdin
-            .as_mut()
-            .expect("dot stdin")
+            .take()
+            .expect("dot stdin");
+        stdin
             .write_all(dot.as_bytes())
             .expect("write dot");
+        drop(stdin);
 
         let output = child.wait_with_output().expect("wait for dot");
         assert!(

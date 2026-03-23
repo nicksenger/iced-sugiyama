@@ -5,7 +5,7 @@ use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use petgraph::Direction::{Incoming, Outgoing};
 
-use crate::{configure::Config, from_graph};
+use crate::{from_graph, Config, RenderConfig};
 
 const EPSILON: f64 = 1e-6;
 const EDGE_LABEL_OBSTACLE_WIDTH: f64 = 78.0;
@@ -109,32 +109,6 @@ pub(crate) struct ClusterLayout<C> {
     pub id: C,
     pub bounds: Rect,
     pub parent: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RenderConfig {
-    /// Padding around node bounds used as routing obstacles.
-    pub routing_padding: f64,
-    /// Penalty applied when route direction changes.
-    pub bend_penalty: f64,
-    /// Default cluster padding when [ClusterSpec::padding] is [None].
-    pub cluster_padding: f64,
-    /// Number of iterative passes used to enforce cluster ordering constraints.
-    pub cluster_constraint_iterations: usize,
-    /// Additional spacing inserted when the layout crosses cluster boundaries.
-    pub cluster_boundary_gap: f64,
-}
-
-impl Default for RenderConfig {
-    fn default() -> Self {
-        Self {
-            routing_padding: 2.0,
-            bend_penalty: 8.0,
-            cluster_padding: 8.0,
-            cluster_constraint_iterations: 4,
-            cluster_boundary_gap: 6.0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

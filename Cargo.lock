@@ -1316,11 +1316,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "graph_generator"
-version = "0.1.0"
-source = "git+https://github.com/paddison/graph_generator.git#f454b8497cbaaae653b6fa1088dd73ade12aac49"
-
-[[package]]
 name = "guillotiere"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1445,10 +1440,8 @@ dependencies = [
 name = "iced-sugiyama-core"
 version = "0.1.0"
 dependencies = [
- "graph_generator",
  "log",
  "petgraph",
- "svg",
 ]
 
 [[package]]
@@ -3090,12 +3083,6 @@ name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
-
-[[package]]
-name = "svg"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94afda9cd163c04f6bee8b4bf2501c91548deae308373c436f36aeff3cf3c4a3"
 
 [[package]]
 name = "svg_fmt"

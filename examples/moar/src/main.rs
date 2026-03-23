@@ -4,7 +4,6 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-#[cfg(feature = "animated")]
 use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
@@ -29,6 +28,7 @@ const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 800.0;
 const DEFAULT_GRAPH_SEED: u64 = 0x5EED_5EED;
 const DEFAULT_GRAPH_NODE_COUNT: u32 = 6;
+const DEFAULT_GRAPH_CLUSTER_COUNT: usize = 3;
 const GRAPHVIZ_PNG_SCALE: f64 = 0.7;
 const MERGED_PNG_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-comp.png";
 const GRAPHVIZ_PLAIN_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-gviz.txt";
@@ -119,7 +119,12 @@ pub fn main() -> iced::Result {
     let options = AppOptions::from_env();
 
     if options.headless && options.noimg {
-        match render_graphviz_artifacts(initial_graph(options.seed, options.node_count), false) {
+        match render_graphviz_artifacts(
+            initial_graph(options.seed, options.node_count),
+            options.seed,
+            options.cluster_count,
+            false,
+        ) {
             Ok(artifacts) => {
                 println!("Wrote {}", artifacts.graphviz_plain_path.display());
                 println!("Wrote {}", artifacts.custom_plain_path.display());
@@ -151,6 +156,7 @@ pub fn main() -> iced::Result {
                 options.noimg,
                 options.seed,
                 options.node_count,
+                options.cluster_count,
             ),
             task,
         )
@@ -168,16 +174,26 @@ struct Moarificator {
     noimg: bool,
     export_in_progress: bool,
     graph: Graph,
+    cluster_seed: u64,
+    cluster_count: usize,
     pending_graphviz_png: Option<Vec<u8>>,
     pending_iced_screenshot: Option<Screenshot>,
 }
 impl Moarificator {
-    fn new(headless: bool, noimg: bool, seed: u64, node_count: u32) -> Self {
+    fn new(
+        headless: bool,
+        noimg: bool,
+        seed: u64,
+        node_count: u32,
+        cluster_count: usize,
+    ) -> Self {
         Self {
             headless,
             noimg,
             export_in_progress: false,
             graph: initial_graph(seed, node_count),
+            cluster_seed: seed,
+            cluster_count,
             pending_graphviz_png: None,
             pending_iced_screenshot: None,
         }
@@ -190,6 +206,7 @@ struct AppOptions {
     noimg: bool,
     seed: u64,
     node_count: u32,
+    cluster_count: usize,
 }
 
 impl AppOptions {
@@ -198,6 +215,7 @@ impl AppOptions {
         let mut noimg = false;
         let mut seed = DEFAULT_GRAPH_SEED;
         let mut node_count = DEFAULT_GRAPH_NODE_COUNT;
+        let mut cluster_count = DEFAULT_GRAPH_CLUSTER_COUNT;
         let mut args = env::args().skip(1);
 
         while let Some(arg) = args.next() {
@@ -222,6 +240,15 @@ impl AppOptions {
                 _ if arg.starts_with("--nodes=") => {
                     node_count = parse_node_count_arg(&arg["--nodes=".len()..]);
                 }
+                "--clusters" => {
+                    let raw_cluster_count = args
+                        .next()
+                        .unwrap_or_else(|| panic!("missing value for --clusters"));
+                    cluster_count = parse_cluster_count_arg(&raw_cluster_count);
+                }
+                _ if arg.starts_with("--clusters=") => {
+                    cluster_count = parse_cluster_count_arg(&arg["--clusters=".len()..]);
+                }
                 _ => {}
             }
         }
@@ -231,6 +258,7 @@ impl AppOptions {
             noimg,
             seed,
             node_count,
+            cluster_count,
         }
     }
 }
@@ -251,6 +279,12 @@ fn parse_node_count_arg(raw_node_count: &str) -> u32 {
         .parse::<u32>()
         .unwrap_or_else(|_| panic!("invalid value for --nodes: {raw_node_count}"))
         .max(1)
+}
+
+fn parse_cluster_count_arg(raw_cluster_count: &str) -> usize {
+    raw_cluster_count
+        .parse::<usize>()
+        .unwrap_or_else(|_| panic!("invalid value for --clusters: {raw_cluster_count}"))
 }
 
 #[derive(Debug, Clone)]
@@ -342,8 +376,12 @@ impl Moarificator {
 
                 let include_png = !(self.headless && self.noimg);
                 let graph = self.graph.clone();
+                let cluster_seed = self.cluster_seed;
+                let cluster_count = self.cluster_count;
                 let render = Task::perform(
-                    async move { render_graphviz_artifacts(graph, include_png) },
+                    async move {
+                        render_graphviz_artifacts(graph, cluster_seed, cluster_count, include_png)
+                    },
                     Message::GraphvizArtifactsReady,
                 );
 
@@ -459,7 +497,7 @@ impl Moarificator {
     }
 
     fn view(&self) -> Container<'_, Message> {
-        let clusters = build_clusters(&self.graph);
+        let clusters = build_clusters(&self.graph, self.cluster_seed, self.cluster_count);
 
         let graph = Container::new({
             let graph = Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.graph, |n| {
@@ -526,7 +564,6 @@ impl Moarificator {
             .cluster_color(|_| Color::TRANSPARENT)
             .padding(70);
 
-            #[cfg(feature = "animated")]
             let graph = {
                 let animation_duration = if self.export_in_progress || self.headless {
                     Duration::ZERO
@@ -572,8 +609,8 @@ impl Moarificator {
     }
 }
 
-fn graph_to_dot(graph: &Graph) -> String {
-    let clusters = build_clusters(graph);
+fn graph_to_dot(graph: &Graph, cluster_seed: u64, cluster_count: usize) -> String {
+    let clusters = build_clusters(graph, cluster_seed, cluster_count);
     let mut dot = String::from("digraph G {\n");
     dot.push_str("    graph [\n");
     dot.push_str("        rankdir=TB,\n");
@@ -701,9 +738,14 @@ fn run_graphviz(dot: &str, format: &'static str) -> Result<Vec<u8>, GraphvizOutp
     }
 }
 
-fn render_graphviz_artifacts(graph: Graph, include_png: bool) -> Result<GraphvizArtifacts, String> {
-    let dot = graph_to_dot(&graph);
-    let clusters = build_clusters(&graph);
+fn render_graphviz_artifacts(
+    graph: Graph,
+    cluster_seed: u64,
+    cluster_count: usize,
+    include_png: bool,
+) -> Result<GraphvizArtifacts, String> {
+    let dot = graph_to_dot(&graph, cluster_seed, cluster_count);
+    let clusters = build_clusters(&graph, cluster_seed, cluster_count);
     let png = if include_png {
         Some(run_graphviz(&dot, "png").map_err(|error| error.to_string())?)
     } else {
@@ -1573,46 +1615,206 @@ fn scaled_dimension(value: u32, factor: f64) -> u32 {
     }
 }
 
-fn build_clusters(graph: &Graph) -> Vec<Cluster> {
-    let even_cluster_nodes = graph
-        .nodes
-        .iter()
-        .copied()
-        .filter(|node| *node != 0 && node % 2 == 0)
-        .collect::<Vec<_>>();
-    let odd_cluster_nodes = graph
-        .nodes
-        .iter()
-        .copied()
-        .filter(|node| *node % 2 == 1)
-        .collect::<Vec<_>>();
-    let all_cluster_nodes = graph
+fn build_clusters(graph: &Graph, cluster_seed: u64, cluster_count: usize) -> Vec<Cluster> {
+    #[derive(Clone, Copy)]
+    enum ClusterItem {
+        Node(u32),
+        Cluster(usize),
+    }
+
+    struct ClusterSpec {
+        parent: Option<usize>,
+        items: Vec<ClusterItem>,
+    }
+
+    fn collect_cluster_nodes(
+        index: usize,
+        specs: &[ClusterSpec],
+        cache: &mut [Option<Vec<u32>>],
+    ) -> Vec<u32> {
+        if let Some(nodes) = &cache[index] {
+            return nodes.clone();
+        }
+
+        let mut nodes = Vec::new();
+        for item in &specs[index].items {
+            match *item {
+                ClusterItem::Node(node) => nodes.push(node),
+                ClusterItem::Cluster(child_index) => {
+                    nodes.extend(collect_cluster_nodes(child_index, specs, cache));
+                }
+            }
+        }
+        nodes.sort_unstable();
+        nodes.dedup();
+        cache[index] = Some(nodes.clone());
+        nodes
+    }
+
+    fn pick_items(
+        items: &mut Vec<ClusterItem>,
+        rng: &mut fastrand::Rng,
+    ) -> Vec<ClusterItem> {
+        let selected_count = rng.usize(1..=items.len());
+        let mut indices = (0..items.len()).collect::<Vec<_>>();
+        rng.shuffle(&mut indices);
+        indices.truncate(selected_count);
+        indices.sort_unstable();
+
+        let mut selected = Vec::with_capacity(selected_count);
+        for index in indices.into_iter().rev() {
+            selected.push(items.remove(index));
+        }
+        selected.reverse();
+        selected
+    }
+
+    fn count_nodes(items: &[ClusterItem]) -> usize {
+        items.iter()
+            .filter(|item| matches!(item, ClusterItem::Node(_)))
+            .count()
+    }
+
+    fn count_clusters(items: &[ClusterItem]) -> usize {
+        items.iter()
+            .filter(|item| matches!(item, ClusterItem::Cluster(_)))
+            .count()
+    }
+
+    fn pick_cluster_contents(
+        items: &mut Vec<ClusterItem>,
+        rng: &mut fastrand::Rng,
+    ) -> Vec<ClusterItem> {
+        let node_indices = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| matches!(item, ClusterItem::Node(_)).then_some(index))
+            .collect::<Vec<_>>();
+        let cluster_indices = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| matches!(item, ClusterItem::Cluster(_)).then_some(index))
+            .collect::<Vec<_>>();
+
+        if node_indices.is_empty() {
+            return pick_items(items, rng);
+        }
+
+        let selected_node_count = rng.usize(1..=node_indices.len());
+        let mut shuffled_node_indices = node_indices;
+        rng.shuffle(&mut shuffled_node_indices);
+        shuffled_node_indices.truncate(selected_node_count);
+
+        let selected_cluster_count = if cluster_indices.is_empty() {
+            0
+        } else if cluster_indices.len() == 1 {
+            usize::from(rng.bool())
+        } else {
+            rng.usize(0..=cluster_indices.len())
+        };
+        let mut shuffled_cluster_indices = cluster_indices;
+        rng.shuffle(&mut shuffled_cluster_indices);
+        shuffled_cluster_indices.truncate(selected_cluster_count);
+
+        let mut selected_indices = shuffled_node_indices;
+        selected_indices.extend(shuffled_cluster_indices);
+        selected_indices.sort_unstable();
+
+        let mut selected = Vec::with_capacity(selected_indices.len());
+        for index in selected_indices.into_iter().rev() {
+            selected.push(items.remove(index));
+        }
+        selected.reverse();
+        selected
+    }
+
+    let clustered_nodes = graph
         .nodes
         .iter()
         .copied()
         .filter(|node| *node != 0)
         .collect::<Vec<_>>();
-    let mut clusters = Vec::new();
-    let mut parent_cluster_index = None;
-    if all_cluster_nodes.len() > 2 {
-        parent_cluster_index = Some(clusters.len());
-        clusters.push(Cluster::new(all_cluster_nodes).padding(10.0));
+
+    if cluster_count == 0 || clustered_nodes.is_empty() {
+        return Vec::new();
     }
-    if odd_cluster_nodes.len() > 1 {
-        let cluster = Cluster::new(odd_cluster_nodes).padding(10.0);
-        clusters.push(match parent_cluster_index {
-            Some(parent) => cluster.parent(parent),
-            None => cluster,
-        });
+
+    let mut rng = fastrand::Rng::with_seed(
+        cluster_seed ^ ((cluster_count as u64) << 32) ^ (clustered_nodes.len() as u64),
+    );
+    let mut root_items = clustered_nodes
+        .into_iter()
+        .map(ClusterItem::Node)
+        .collect::<Vec<_>>();
+    let mut specs: Vec<ClusterSpec> = Vec::with_capacity(cluster_count);
+
+    for cluster_index in 0..cluster_count {
+        let mut candidates = Vec::with_capacity(cluster_index + 1);
+        let root_node_count = count_nodes(&root_items);
+        let root_cluster_count = count_clusters(&root_items);
+        if root_node_count > 0 || root_cluster_count > 1 {
+            candidates.push(None);
+        }
+        for existing_index in 0..specs.len() {
+            let node_count = count_nodes(&specs[existing_index].items);
+            let child_count = count_clusters(&specs[existing_index].items);
+            if node_count > 0 || child_count > 1 {
+                candidates.push(Some(existing_index));
+            }
+        }
+
+        if candidates.is_empty() {
+            if !root_items.is_empty() {
+                candidates.push(None);
+            }
+            for existing_index in 0..specs.len() {
+                if !specs[existing_index].items.is_empty() {
+                    candidates.push(Some(existing_index));
+                }
+            }
+        }
+
+        let parent = candidates[rng.usize(0..candidates.len())];
+        let items = match parent {
+            Some(parent_index) => pick_cluster_contents(&mut specs[parent_index].items, &mut rng),
+            None => pick_cluster_contents(&mut root_items, &mut rng),
+        };
+
+        specs.push(ClusterSpec { parent, items });
+
+        let child_indices = specs[cluster_index]
+            .items
+            .iter()
+            .filter_map(|item| match *item {
+                ClusterItem::Cluster(child_index) => Some(child_index),
+                ClusterItem::Node(_) => None,
+            })
+            .collect::<Vec<_>>();
+        for child_index in child_indices {
+            specs[child_index].parent = Some(cluster_index);
+        }
+
+        match parent {
+            Some(parent_index) => specs[parent_index]
+                .items
+                .push(ClusterItem::Cluster(cluster_index)),
+            None => root_items.push(ClusterItem::Cluster(cluster_index)),
+        }
     }
-    if even_cluster_nodes.len() > 1 {
-        let cluster = Cluster::new(even_cluster_nodes).padding(10.0);
-        clusters.push(match parent_cluster_index {
-            Some(parent) => cluster.parent(parent),
-            None => cluster,
-        });
-    }
-    clusters
+
+    let mut cache = vec![None; specs.len()];
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            let cluster = Cluster::new(collect_cluster_nodes(index, &specs, &mut cache))
+                .padding(10.0);
+            match spec.parent {
+                Some(parent) => cluster.parent(parent),
+                None => cluster,
+            }
+        })
+        .collect()
 }
 
 fn node_label(node: u32) -> String {

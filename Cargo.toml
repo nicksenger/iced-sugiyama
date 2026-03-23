@@ -3,13 +3,9 @@ name = "iced-sugiyama"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = []
-animated = ["dep:lyon_algorithms"]
-
 [dependencies]
 iced.workspace = true
-lyon_algorithms = { workspace = true, optional = true }
+lyon_algorithms.workspace = true
 rust_sugiyama.workspace = true
 petgraph = "0.8"
 

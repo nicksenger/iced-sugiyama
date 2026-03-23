@@ -6,10 +6,6 @@ authors = ["Nick Senger"]
 edition = "2024"
 publish = false
 
-[features]
-default = []
-animated = ["iced-sugiyama/animated"]
-
 [dependencies]
 fastrand = "2"
 image = { version = "0.24", default-features = false, features = ["png"] }

@@ -16,7 +16,7 @@ use iced::window::RedrawRequest;
 use iced::{Color, Element, Length, Padding, Point, Size, Task, Transformation, Vector, event};
 
 pub use crate::layout_engine::{Cluster, EdgeEndpoint, EdgeEndpointKind};
-use crate::layout_engine::{GraphLayout, compute_layout, layout_signature};
+use crate::layout_engine::{GraphLayout, compute_layout};
 use crate::motion::easing::Easing;
 
 pub mod motion;
@@ -266,7 +266,7 @@ impl Animation {
 pub struct Graph {
     pub nodes: Vec<u32>,
     pub edges: Vec<(u32, u32)>,
-    pub config: rust_sugiyama::configure::Config,
+    pub config: rust_sugiyama::Config,
 }
 
 impl<'a> From<&'a Graph> for Cow<'a, Graph> {
@@ -287,11 +287,11 @@ impl Graph {
         Self {
             nodes,
             edges,
-            config: rust_sugiyama::configure::Config::default(),
+            config: rust_sugiyama::Config::default(),
         }
     }
 
-    pub fn config(self, config: rust_sugiyama::configure::Config) -> Self {
+    pub fn config(self, config: rust_sugiyama::Config) -> Self {
         Self { config, ..self }
     }
 }
@@ -396,7 +396,7 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
     >,
     node_size: Box<dyn Fn(u32) -> (f64, f64) + 'a>,
     clusters: Vec<Cluster>,
-    render_config: rust_sugiyama::advanced::RenderConfig,
+    render_config: rust_sugiyama::RenderConfig,
     cluster_color: fn(usize) -> Color,
     label_color: fn(usize) -> Color,
     padding: Padding,
@@ -520,7 +520,7 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
         self.cluster_container(f)
     }
 
-    pub fn render_config(mut self, config: rust_sugiyama::advanced::RenderConfig) -> Self {
+    pub fn render_config(mut self, config: rust_sugiyama::RenderConfig) -> Self {
         self.render_config = config;
         self
     }
@@ -600,7 +600,11 @@ where
                 });
 
                 let old_sugiyama = old_sugiyama.clone();
-                let signature = layout_signature(&graph.nodes, &graph.edges, &self.clusters);
+                let signature = crate::layout_engine::layout_signature(
+                    &graph.nodes,
+                    &graph.edges,
+                    &self.clusters,
+                );
                 let sugiyama = {
                     let mut memo = layout_memo.borrow_mut();
                     memo.layout_for(signature, || {
@@ -640,50 +644,50 @@ where
                         .collect::<HashMap<_, _>>()
                 });
                 let mut cluster_container_children = Vec::new();
-                for cluster in &sugiyama.clusters {
-                    let Some(cluster_spec) = self.clusters.get(cluster.index) else {
+                for cluster in sugiyama.clusters() {
+                    let Some(cluster_spec) = self.clusters.get(cluster.index()) else {
                         continue;
                     };
-                    let Some(container) = (self.cluster_container)(cluster.index, cluster_spec)
+                    let Some(container) = (self.cluster_container)(cluster.index(), cluster_spec)
                     else {
                         continue;
                     };
                     cluster_container_children.push(ClusterContainerChild {
-                        cluster_index: cluster.index,
+                        cluster_index: cluster.index(),
                     });
                     children.push(container.map(Event::Passthrough));
                 }
                 let mut edge_label_children = Vec::new();
                 let mut edge_label_overlay_edges = HashSet::new();
-                for edge in &sugiyama.edges {
-                    let Some(edge_data) = graph.edges.get(edge.index).copied() else {
+                for edge in sugiyama.edges() {
+                    let Some(edge_data) = graph.edges.get(edge.index()).copied() else {
                         continue;
                     };
                     let style = edge_style_by_index
-                        .get(&edge.index)
+                        .get(&edge.index())
                         .copied()
                         .unwrap_or_default();
                     if !style.visible || style.alpha <= f32::EPSILON {
                         continue;
                     }
                     let Some(label_element) =
-                        (self.edge_label_element)(edge.index, edge_data, edge.label.as_deref())
+                        (self.edge_label_element)(edge.index(), edge_data, edge.label())
                     else {
                         continue;
                     };
-                    edge_label_overlay_edges.insert(edge.index);
+                    edge_label_overlay_edges.insert(edge.index());
                     edge_label_children.push(EdgeLabelChild {
-                        edge_index: edge.index,
+                        edge_index: edge.index(),
                     });
                     children.push(label_element.map(Event::Passthrough));
                 }
                 let mut edge_endpoint_children = Vec::new();
-                for edge in &sugiyama.edges {
-                    let Some(edge_data) = graph.edges.get(edge.index).copied() else {
+                for edge in sugiyama.edges() {
+                    let Some(edge_data) = graph.edges.get(edge.index()).copied() else {
                         continue;
                     };
                     let style = edge_style_by_index
-                        .get(&edge.index)
+                        .get(&edge.index())
                         .copied()
                         .unwrap_or_default();
                     if !style.visible || style.alpha <= f32::EPSILON {
@@ -698,7 +702,7 @@ where
                         let Some(node_index) = node_map.get(&node_id).copied() else {
                             continue;
                         };
-                        let Some((cx, cy)) = sugiyama.coords.get(&node_index).copied() else {
+                        let Some((cx, cy)) = sugiyama.position(node_index) else {
                             continue;
                         };
                         let (width, height) = (self.node_size)(node_id);
@@ -714,12 +718,12 @@ where
                             continue;
                         };
                         let Some(widget) =
-                            (self.edge_endpoint)(edge.index, edge_data, kind, endpoint)
+                            (self.edge_endpoint)(edge.index(), edge_data, kind, endpoint)
                         else {
                             continue;
                         };
                         edge_endpoint_children.push(EdgeEndpointChild {
-                            edge_index: edge.index,
+                            edge_index: edge.index(),
                             edge: edge_data,
                             kind,
                         });
@@ -780,7 +784,11 @@ where
 
     fn update(&mut self, state: &mut Self::State, event: Self::Event) -> Option<Message> {
         state.switch_state.flip();
-        let signature = layout_signature(&self.graph.nodes, &self.graph.edges, &self.clusters);
+        let signature = crate::layout_engine::layout_signature(
+            &self.graph.nodes,
+            &self.graph.edges,
+            &self.clusters,
+        );
         {
             let mut memo = state.layout_memo.borrow_mut();
             let _ = memo.layout_for(signature, || {
@@ -908,30 +916,31 @@ where
 
                 match animation {
                     Animation::Pending => {
-                        for cluster in &old_layout.clusters {
+                        for cluster in old_layout.clusters() {
                             draw_cluster_outline(
                                 frame,
                                 scaled_stroke_width,
-                                (self.cluster_color)(cluster.index),
-                                project(old_layout, cluster.min_x, cluster.min_y),
-                                project(old_layout, cluster.max_x, cluster.max_y),
+                                (self.cluster_color)(cluster.index()),
+                                project(old_layout, cluster.min_x(), cluster.min_y()),
+                                project(old_layout, cluster.max_x(), cluster.max_y()),
                             );
                         }
-                        for edge in &old_layout.edges {
+                        for edge in old_layout.edges() {
                             let projected = edge
-                                .points
+                                .points()
                                 .iter()
                                 .map(|(x, y)| project(old_layout, *x, *y))
                                 .collect::<Vec<_>>();
                             let projected_curve = edge
-                                .curve_points
+                                .curve_points()
                                 .iter()
                                 .map(|(x, y)| project(old_layout, *x, *y))
                                 .collect::<Vec<_>>();
                             let label_position = edge_canvas_label_position(
                                 &self.edge_label_overlay_edges,
-                                edge.index,
-                                edge.label_position.map(|(x, y)| project(old_layout, x, y)),
+                                edge.index(),
+                                edge.label_position()
+                                    .map(|(x, y)| project(old_layout, x, y)),
                             );
                             draw_styled_edge(
                                 frame,
@@ -944,37 +953,37 @@ where
                                 edge,
                                 &projected,
                                 &projected_curve,
-                                style_for_old(edge.index),
+                                style_for_old(edge.index()),
                                 1.0,
                                 label_position,
                             );
                         }
                     }
                     Animation::Complete => {
-                        for cluster in &self.sugiyama.clusters {
+                        for cluster in self.sugiyama.clusters() {
                             draw_cluster_outline(
                                 frame,
                                 scaled_stroke_width,
-                                (self.cluster_color)(cluster.index),
-                                project(&self.sugiyama, cluster.min_x, cluster.min_y),
-                                project(&self.sugiyama, cluster.max_x, cluster.max_y),
+                                (self.cluster_color)(cluster.index()),
+                                project(&self.sugiyama, cluster.min_x(), cluster.min_y()),
+                                project(&self.sugiyama, cluster.max_x(), cluster.max_y()),
                             );
                         }
-                        for edge in &self.sugiyama.edges {
+                        for edge in self.sugiyama.edges() {
                             let projected = edge
-                                .points
+                                .points()
                                 .iter()
                                 .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                 .collect::<Vec<_>>();
                             let projected_curve = edge
-                                .curve_points
+                                .curve_points()
                                 .iter()
                                 .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                 .collect::<Vec<_>>();
                             let label_position = edge_canvas_label_position(
                                 &self.edge_label_overlay_edges,
-                                edge.index,
-                                edge.label_position
+                                edge.index(),
+                                edge.label_position()
                                     .map(|(x, y)| project(&self.sugiyama, x, y)),
                             );
                             draw_styled_edge(
@@ -988,7 +997,7 @@ where
                                 edge,
                                 &projected,
                                 &projected_curve,
-                                style_for_current(edge.index),
+                                style_for_current(edge.index()),
                                 1.0,
                                 label_position,
                             );
@@ -996,35 +1005,31 @@ where
                     }
                     Animation::Active { .. } => {
                         let mut old_clusters = old_layout
-                            .clusters
+                            .clusters()
                             .iter()
-                            .map(|cluster| (cluster.index, cluster))
+                            .map(|cluster| (cluster.index(), cluster))
                             .collect::<HashMap<_, _>>();
 
-                        for cluster in &self.sugiyama.clusters {
-                            if let Some(old_cluster) = old_clusters.remove(&cluster.index) {
-                                let interpolated = crate::layout_engine::ClusterLayout {
-                                    index: cluster.index,
-                                    parent: cluster.parent,
-                                    min_x: lerp(old_cluster.min_x, cluster.min_x, progress),
-                                    min_y: lerp(old_cluster.min_y, cluster.min_y, progress),
-                                    max_x: lerp(old_cluster.max_x, cluster.max_x, progress),
-                                    max_y: lerp(old_cluster.max_y, cluster.max_y, progress),
-                                };
+                        for cluster in self.sugiyama.clusters() {
+                            if let Some(old_cluster) = old_clusters.remove(&cluster.index()) {
+                                let min_x = lerp(old_cluster.min_x(), cluster.min_x(), progress);
+                                let min_y = lerp(old_cluster.min_y(), cluster.min_y(), progress);
+                                let max_x = lerp(old_cluster.max_x(), cluster.max_x(), progress);
+                                let max_y = lerp(old_cluster.max_y(), cluster.max_y(), progress);
                                 draw_cluster_outline(
                                     frame,
                                     scaled_stroke_width,
-                                    (self.cluster_color)(cluster.index),
-                                    project(&self.sugiyama, interpolated.min_x, interpolated.min_y),
-                                    project(&self.sugiyama, interpolated.max_x, interpolated.max_y),
+                                    (self.cluster_color)(cluster.index()),
+                                    project(&self.sugiyama, min_x, min_y),
+                                    project(&self.sugiyama, max_x, max_y),
                                 );
                             } else {
                                 draw_cluster_outline(
                                     frame,
                                     scaled_stroke_width,
-                                    (self.cluster_color)(cluster.index).scale_alpha(progress),
-                                    project(&self.sugiyama, cluster.min_x, cluster.min_y),
-                                    project(&self.sugiyama, cluster.max_x, cluster.max_y),
+                                    (self.cluster_color)(cluster.index()).scale_alpha(progress),
+                                    project(&self.sugiyama, cluster.min_x(), cluster.min_y()),
+                                    project(&self.sugiyama, cluster.max_x(), cluster.max_y()),
                                 );
                             }
                         }
@@ -1032,32 +1037,32 @@ where
                             draw_cluster_outline(
                                 frame,
                                 scaled_stroke_width,
-                                (self.cluster_color)(cluster.index).scale_alpha(1.0 - progress),
-                                project(old_layout, cluster.min_x, cluster.min_y),
-                                project(old_layout, cluster.max_x, cluster.max_y),
+                                (self.cluster_color)(cluster.index()).scale_alpha(1.0 - progress),
+                                project(old_layout, cluster.min_x(), cluster.min_y()),
+                                project(old_layout, cluster.max_x(), cluster.max_y()),
                             );
                         }
 
                         let mut old_edges = old_layout
-                            .edges
+                            .edges()
                             .iter()
-                            .map(|edge| (edge.index, edge))
+                            .map(|edge| (edge.index(), edge))
                             .collect::<HashMap<_, _>>();
 
-                        for edge in &self.sugiyama.edges {
-                            if let Some(old_edge) = old_edges.remove(&edge.index) {
+                        for edge in self.sugiyama.edges() {
+                            if let Some(old_edge) = old_edges.remove(&edge.index()) {
                                 let projected_old = old_edge
-                                    .points
+                                    .points()
                                     .iter()
                                     .map(|(x, y)| project(old_layout, *x, *y))
                                     .collect::<Vec<_>>();
                                 let projected_new = edge
-                                    .points
+                                    .points()
                                     .iter()
                                     .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                     .collect::<Vec<_>>();
                                 let projected_new_curve = edge
-                                    .curve_points
+                                    .curve_points()
                                     .iter()
                                     .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                     .collect::<Vec<_>>();
@@ -1068,8 +1073,8 @@ where
                                 );
                                 let interpolated_label_position = edge_canvas_label_position(
                                     &self.edge_label_overlay_edges,
-                                    edge.index,
-                                    match (old_edge.label_position, edge.label_position) {
+                                    edge.index(),
+                                    match (old_edge.label_position(), edge.label_position()) {
                                         (Some((ox, oy)), Some((nx, ny))) => Some(Point::new(
                                             lerp(
                                                 project(old_layout, ox, oy).x as f64,
@@ -1091,14 +1096,14 @@ where
                                 );
                                 let final_label_position = edge_canvas_label_position(
                                     &self.edge_label_overlay_edges,
-                                    edge.index,
-                                    edge.label_position
+                                    edge.index(),
+                                    edge.label_position()
                                         .map(|(x, y)| project(&self.sugiyama, x, y)),
                                 );
                                 let settle = ((progress - EDGE_FINAL_SETTLE_START)
                                     / (1.0 - EDGE_FINAL_SETTLE_START))
                                     .clamp(0.0, 1.0);
-                                let style = style_for_current(edge.index);
+                                let style = style_for_current(edge.index());
                                 draw_styled_edge(
                                     frame,
                                     scaled_stroke_width,
@@ -1133,19 +1138,19 @@ where
                                 }
                             } else {
                                 let projected = edge
-                                    .points
+                                    .points()
                                     .iter()
                                     .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                     .collect::<Vec<_>>();
                                 let projected_curve = edge
-                                    .curve_points
+                                    .curve_points()
                                     .iter()
                                     .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                     .collect::<Vec<_>>();
                                 let label_position = edge_canvas_label_position(
                                     &self.edge_label_overlay_edges,
-                                    edge.index,
-                                    edge.label_position
+                                    edge.index(),
+                                    edge.label_position()
                                         .map(|(x, y)| project(&self.sugiyama, x, y)),
                                 );
                                 draw_styled_edge(
@@ -1159,7 +1164,7 @@ where
                                     edge,
                                     &projected,
                                     &projected_curve,
-                                    style_for_current(edge.index),
+                                    style_for_current(edge.index()),
                                     progress,
                                     label_position,
                                 );
@@ -1168,19 +1173,20 @@ where
 
                         for edge in old_edges.values() {
                             let projected = edge
-                                .points
+                                .points()
                                 .iter()
                                 .map(|(x, y)| project(old_layout, *x, *y))
                                 .collect::<Vec<_>>();
                             let projected_curve = edge
-                                .curve_points
+                                .curve_points()
                                 .iter()
                                 .map(|(x, y)| project(old_layout, *x, *y))
                                 .collect::<Vec<_>>();
                             let label_position = edge_canvas_label_position(
                                 &self.edge_label_overlay_edges,
-                                edge.index,
-                                edge.label_position.map(|(x, y)| project(old_layout, x, y)),
+                                edge.index(),
+                                edge.label_position()
+                                    .map(|(x, y)| project(old_layout, x, y)),
                             );
                             draw_styled_edge(
                                 frame,
@@ -1193,7 +1199,7 @@ where
                                 edge,
                                 &projected,
                                 &projected_curve,
-                                style_for_old(edge.index),
+                                style_for_old(edge.index()),
                                 1.0 - progress,
                                 label_position,
                             );
@@ -1201,30 +1207,30 @@ where
                     }
                 }
             } else {
-                for cluster in &self.sugiyama.clusters {
+                for cluster in self.sugiyama.clusters() {
                     draw_cluster_outline(
                         frame,
                         scaled_stroke_width,
-                        (self.cluster_color)(cluster.index),
-                        project(&self.sugiyama, cluster.min_x, cluster.min_y),
-                        project(&self.sugiyama, cluster.max_x, cluster.max_y),
+                        (self.cluster_color)(cluster.index()),
+                        project(&self.sugiyama, cluster.min_x(), cluster.min_y()),
+                        project(&self.sugiyama, cluster.max_x(), cluster.max_y()),
                     );
                 }
-                for edge in &self.sugiyama.edges {
+                for edge in self.sugiyama.edges() {
                     let projected = edge
-                        .points
+                        .points()
                         .iter()
                         .map(|(x, y)| project(&self.sugiyama, *x, *y))
                         .collect::<Vec<_>>();
                     let projected_curve = edge
-                        .curve_points
+                        .curve_points()
                         .iter()
                         .map(|(x, y)| project(&self.sugiyama, *x, *y))
                         .collect::<Vec<_>>();
                     let label_position = edge_canvas_label_position(
                         &self.edge_label_overlay_edges,
-                        edge.index,
-                        edge.label_position
+                        edge.index(),
+                        edge.label_position()
                             .map(|(x, y)| project(&self.sugiyama, x, y)),
                     );
                     draw_styled_edge(
@@ -1238,7 +1244,7 @@ where
                         edge,
                         &projected,
                         &projected_curve,
-                        style_for_current(edge.index),
+                        style_for_current(edge.index()),
                         1.0,
                         label_position,
                     );
@@ -1949,7 +1955,7 @@ fn draw_styled_edge<Renderer>(
     let endpoint_extension = scaled_endpoint_extension * width_scale;
     let label_size = scaled_edge_label_size * width_scale.max(0.25);
 
-    let (mut from_color, mut to_color) = edge_color(edge.index);
+    let (mut from_color, mut to_color) = edge_color(edge.index());
     if let Some((from_override, to_override)) = style.color_override {
         from_color = from_override;
         to_color = to_override;
@@ -1965,7 +1971,7 @@ fn draw_styled_edge<Renderer>(
         projected_curve_points,
         from_color,
         to_color,
-        label_color(edge.index),
+        label_color(edge.index()),
         alpha,
         label_size,
         label_position,
@@ -2009,9 +2015,9 @@ fn draw_edge_with_label<Renderer>(
         },
     );
 
-    if let (Some(label), Some(position)) = (&edge.label, label_position) {
+    if let (Some(label), Some(position)) = (edge.label(), label_position) {
         frame.fill_text(canvas::Text {
-            content: label.clone(),
+            content: label.to_string(),
             position,
             color: label_color.scale_alpha(alpha),
             size: iced::Pixels(label_text_size.max(1.0)),
@@ -2391,8 +2397,8 @@ fn apply_view_transform(point: Vector, size: Size, viewport: ViewportState) -> V
 
 fn layout_offset(sugiyama: &GraphLayout, size: iced::Size) -> Vector {
     Vector {
-        x: (size.width - sugiyama.max_x as f32).max(0.0) * 0.5,
-        y: (size.height - sugiyama.max_y as f32).max(0.0) * 0.5,
+        x: (size.width - sugiyama.max_x() as f32).max(0.0) * 0.5,
+        y: (size.height - sugiyama.max_y() as f32).max(0.0) * 0.5,
     }
 }
 
@@ -2404,12 +2410,12 @@ fn edge_endpoint_metadata(
     endpoint_extension: f32,
 ) -> Option<EdgeEndpoint> {
     let points = edge
-        .points
+        .points()
         .iter()
         .map(|(x, y)| Point::new(*x as f32, *y as f32))
         .collect::<Vec<_>>();
     let curve_points = edge
-        .curve_points
+        .curve_points()
         .iter()
         .map(|(x, y)| Point::new(*x as f32, *y as f32))
         .collect::<Vec<_>>();
@@ -2446,14 +2452,14 @@ fn edge_label_positions(
         let old_offset = layout_offset(old_sugiyama, size);
         let new_offset = layout_offset(sugiyama, size);
         let old_edges = old_sugiyama
-            .edges
+            .edges()
             .iter()
-            .map(|edge| (edge.index, edge))
+            .map(|edge| (edge.index(), edge))
             .collect::<HashMap<_, _>>();
         let new_edges = sugiyama
-            .edges
+            .edges()
             .iter()
-            .map(|edge| (edge.index, edge))
+            .map(|edge| (edge.index(), edge))
             .collect::<HashMap<_, _>>();
 
         match animation {
@@ -2510,9 +2516,9 @@ fn edge_label_positions(
     } else {
         let offset = layout_offset(sugiyama, size);
         let edges = sugiyama
-            .edges
+            .edges()
             .iter()
-            .map(|edge| (edge.index, edge))
+            .map(|edge| (edge.index(), edge))
             .collect::<HashMap<_, _>>();
         edge_label_children
             .iter()
@@ -2527,11 +2533,11 @@ fn edge_label_positions(
 }
 
 fn edge_label_anchor(edge: &crate::layout_engine::EdgeLayout, offset: Vector) -> Option<Vector> {
-    if let Some((x, y)) = edge.label_position {
+    if let Some((x, y)) = edge.label_position() {
         return Some(Vector::new(x as f32 + offset.x, y as f32 + offset.y));
     }
 
-    polyline_midpoint_f64(&edge.points)
+    polyline_midpoint_f64(&edge.points())
         .map(|(x, y)| Vector::new(x as f32 + offset.x, y as f32 + offset.y))
 }
 
@@ -2598,14 +2604,14 @@ fn edge_endpoint_positions(
                 let old_offset = layout_offset(old_sugiyama, size);
                 let new_offset = layout_offset(sugiyama, size);
                 let old_edges = old_sugiyama
-                    .edges
+                    .edges()
                     .iter()
-                    .map(|edge| (edge.index, edge))
+                    .map(|edge| (edge.index(), edge))
                     .collect::<HashMap<_, _>>();
                 let new_edges = sugiyama
-                    .edges
+                    .edges()
                     .iter()
-                    .map(|edge| (edge.index, edge))
+                    .map(|edge| (edge.index(), edge))
                     .collect::<HashMap<_, _>>();
 
                 endpoint_children
@@ -2615,7 +2621,7 @@ fn edge_endpoint_positions(
                             old_edges.get(&child.edge_index).copied()
                         {
                             old_edge
-                                .points
+                                .points()
                                 .iter()
                                 .map(|(x, y)| {
                                     Point::new(*x as f32 + old_offset.x, *y as f32 + old_offset.y)
@@ -2623,7 +2629,7 @@ fn edge_endpoint_positions(
                                 .collect::<Vec<_>>()
                         } else if let Some(new_edge) = new_edges.get(&child.edge_index).copied() {
                             new_edge
-                                .points
+                                .points()
                                 .iter()
                                 .map(|(x, y)| {
                                     Point::new(*x as f32 + new_offset.x, *y as f32 + new_offset.y)
@@ -2636,7 +2642,7 @@ fn edge_endpoint_positions(
                             old_edges.get(&child.edge_index).copied()
                         {
                             old_edge
-                                .curve_points
+                                .curve_points()
                                 .iter()
                                 .map(|(x, y)| {
                                     Point::new(*x as f32 + old_offset.x, *y as f32 + old_offset.y)
@@ -2644,7 +2650,7 @@ fn edge_endpoint_positions(
                                 .collect::<Vec<_>>()
                         } else if let Some(new_edge) = new_edges.get(&child.edge_index).copied() {
                             new_edge
-                                .curve_points
+                                .curve_points()
                                 .iter()
                                 .map(|(x, y)| {
                                     Point::new(*x as f32 + new_offset.x, *y as f32 + new_offset.y)
@@ -2692,14 +2698,14 @@ fn edge_endpoint_positions(
                 let old_offset = layout_offset(old_sugiyama, size);
                 let new_offset = layout_offset(sugiyama, size);
                 let old_edges = old_sugiyama
-                    .edges
+                    .edges()
                     .iter()
-                    .map(|edge| (edge.index, edge))
+                    .map(|edge| (edge.index(), edge))
                     .collect::<HashMap<_, _>>();
                 let new_edges = sugiyama
-                    .edges
+                    .edges()
                     .iter()
-                    .map(|edge| (edge.index, edge))
+                    .map(|edge| (edge.index(), edge))
                     .collect::<HashMap<_, _>>();
 
                 endpoint_children
@@ -2711,7 +2717,7 @@ fn edge_endpoint_positions(
                         let points = match (old_edge, new_edge) {
                             (Some(old_edge), Some(new_edge)) => {
                                 let projected_old = old_edge
-                                    .points
+                                    .points()
                                     .iter()
                                     .map(|(x, y)| {
                                         Point::new(
@@ -2721,7 +2727,7 @@ fn edge_endpoint_positions(
                                     })
                                     .collect::<Vec<_>>();
                                 let projected_new = new_edge
-                                    .points
+                                    .points()
                                     .iter()
                                     .map(|(x, y)| {
                                         Point::new(
@@ -2737,14 +2743,14 @@ fn edge_endpoint_positions(
                                 )
                             }
                             (None, Some(new_edge)) => new_edge
-                                .points
+                                .points()
                                 .iter()
                                 .map(|(x, y)| {
                                     Point::new(*x as f32 + new_offset.x, *y as f32 + new_offset.y)
                                 })
                                 .collect::<Vec<_>>(),
                             (Some(old_edge), None) => old_edge
-                                .points
+                                .points()
                                 .iter()
                                 .map(|(x, y)| {
                                     Point::new(*x as f32 + old_offset.x, *y as f32 + old_offset.y)
@@ -2787,9 +2793,9 @@ fn edge_endpoint_positions(
             Animation::Complete => {
                 let offset = layout_offset(sugiyama, size);
                 let edges = sugiyama
-                    .edges
+                    .edges()
                     .iter()
-                    .map(|edge| (edge.index, edge))
+                    .map(|edge| (edge.index(), edge))
                     .collect::<HashMap<_, _>>();
                 endpoint_children
                     .iter()
@@ -2797,7 +2803,7 @@ fn edge_endpoint_positions(
                         let points = edges
                             .get(&child.edge_index)
                             .map(|edge| {
-                                edge.points
+                                edge.points()
                                     .iter()
                                     .map(|(x, y)| {
                                         Point::new(*x as f32 + offset.x, *y as f32 + offset.y)
@@ -2808,7 +2814,7 @@ fn edge_endpoint_positions(
                         let curve_points = edges
                             .get(&child.edge_index)
                             .map(|edge| {
-                                edge.curve_points
+                                edge.curve_points()
                                     .iter()
                                     .map(|(x, y)| {
                                         Point::new(*x as f32 + offset.x, *y as f32 + offset.y)
@@ -2851,9 +2857,9 @@ fn edge_endpoint_positions(
     } else {
         let offset = layout_offset(sugiyama, size);
         let edges = sugiyama
-            .edges
+            .edges()
             .iter()
-            .map(|edge| (edge.index, edge))
+            .map(|edge| (edge.index(), edge))
             .collect::<HashMap<_, _>>();
         endpoint_children
             .iter()
@@ -2861,7 +2867,7 @@ fn edge_endpoint_positions(
                 let points = edges
                     .get(&child.edge_index)
                     .map(|edge| {
-                        edge.points
+                        edge.points()
                             .iter()
                             .map(|(x, y)| Point::new(*x as f32 + offset.x, *y as f32 + offset.y))
                             .collect::<Vec<_>>()
@@ -2870,7 +2876,7 @@ fn edge_endpoint_positions(
                 let curve_points = edges
                     .get(&child.edge_index)
                     .map(|edge| {
-                        edge.curve_points
+                        edge.curve_points()
                             .iter()
                             .map(|(x, y)| Point::new(*x as f32 + offset.x, *y as f32 + offset.y))
                             .collect::<Vec<_>>()
@@ -3279,15 +3285,15 @@ fn cluster_container_layouts(
                     .iter()
                     .map(|child| {
                         if let Some(cluster) = old_sugiyama
-                            .clusters
+                            .clusters()
                             .iter()
-                            .find(|cluster| cluster.index == child.cluster_index)
+                            .find(|cluster| cluster.index() == child.cluster_index)
                         {
                             cluster_container_layout(cluster, old_offset)
                         } else if let Some(cluster) = sugiyama
-                            .clusters
+                            .clusters()
                             .iter()
-                            .find(|cluster| cluster.index == child.cluster_index)
+                            .find(|cluster| cluster.index() == child.cluster_index)
                         {
                             cluster_container_layout(cluster, new_offset)
                         } else {
@@ -3309,20 +3315,20 @@ fn cluster_container_layouts(
                     .iter()
                     .map(|child| {
                         let old_cluster = old_sugiyama
-                            .clusters
+                            .clusters()
                             .iter()
-                            .find(|cluster| cluster.index == child.cluster_index);
+                            .find(|cluster| cluster.index() == child.cluster_index);
                         let new_cluster = sugiyama
-                            .clusters
+                            .clusters()
                             .iter()
-                            .find(|cluster| cluster.index == child.cluster_index);
+                            .find(|cluster| cluster.index() == child.cluster_index);
                         match (old_cluster, new_cluster) {
                             (Some(old_cluster), Some(new_cluster)) => {
                                 cluster_container_layout_from_bounds(
-                                    lerp(old_cluster.min_x, new_cluster.min_x, progress),
-                                    lerp(old_cluster.min_y, new_cluster.min_y, progress),
-                                    lerp(old_cluster.max_x, new_cluster.max_x, progress),
-                                    lerp(old_cluster.max_y, new_cluster.max_y, progress),
+                                    lerp(old_cluster.min_x(), new_cluster.min_x(), progress),
+                                    lerp(old_cluster.min_y(), new_cluster.min_y(), progress),
+                                    lerp(old_cluster.max_x(), new_cluster.max_x(), progress),
+                                    lerp(old_cluster.max_y(), new_cluster.max_y(), progress),
                                     new_offset,
                                 )
                             }
@@ -3346,9 +3352,9 @@ fn cluster_container_layouts(
                     .iter()
                     .map(|child| {
                         sugiyama
-                            .clusters
+                            .clusters()
                             .iter()
-                            .find(|cluster| cluster.index == child.cluster_index)
+                            .find(|cluster| cluster.index() == child.cluster_index)
                             .map(|cluster| cluster_container_layout(cluster, offset))
                             .unwrap_or(ClusterContainerLayout {
                                 center: Vector::new(offset.x, offset.y),
@@ -3364,9 +3370,9 @@ fn cluster_container_layouts(
             .iter()
             .map(|child| {
                 sugiyama
-                    .clusters
+                    .clusters()
                     .iter()
-                    .find(|cluster| cluster.index == child.cluster_index)
+                    .find(|cluster| cluster.index() == child.cluster_index)
                     .map(|cluster| cluster_container_layout(cluster, offset))
                     .unwrap_or(ClusterContainerLayout {
                         center: Vector::new(offset.x, offset.y),
@@ -3382,10 +3388,10 @@ fn cluster_container_layout(
     offset: Vector,
 ) -> ClusterContainerLayout {
     cluster_container_layout_from_bounds(
-        cluster.min_x,
-        cluster.min_y,
-        cluster.max_x,
-        cluster.max_y,
+        cluster.min_x(),
+        cluster.min_y(),
+        cluster.max_x(),
+        cluster.max_y(),
         offset,
     )
 }
@@ -3427,7 +3433,7 @@ fn child_positions(
 
     let new_position = |node_id: u32| -> Option<Vector> {
         let new_index = node_map.get(&node_id).copied()?;
-        let (x, y) = sugiyama.coords.get(&new_index).copied()?;
+        let (x, y) = sugiyama.position(new_index)?;
         Some(Vector {
             x: x as f32 + new_offset.x,
             y: y as f32 + new_offset.y,
@@ -3450,7 +3456,7 @@ fn child_positions(
     let old_offset = layout_offset(old_sugiyama, size);
     let old_position = |node_id: u32| -> Option<Vector> {
         let old_index = old_node_map?.get(&node_id).copied()?;
-        let (x, y) = old_sugiyama.coords.get(&old_index).copied()?;
+        let (x, y) = old_sugiyama.position(old_index)?;
         Some(Vector {
             x: x as f32 + old_offset.x,
             y: y as f32 + old_offset.y,

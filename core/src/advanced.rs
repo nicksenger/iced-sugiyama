@@ -25,7 +25,7 @@ const EDGE_LABEL_CLUSTER_CLEARANCE: f64 = 6.0;
 const ROUTE_JOG_CLEARANCE: f64 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rect {
+pub(crate) struct Rect {
     pub min_x: f64,
     pub min_y: f64,
     pub max_x: f64,
@@ -73,7 +73,7 @@ impl Rect {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RoutedNode<T> {
+pub(crate) struct RoutedNode<T> {
     pub id: T,
     pub center: (f64, f64),
     pub size: (f64, f64),
@@ -81,13 +81,13 @@ pub struct RoutedNode<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct EdgeLabel<L> {
+pub(crate) struct EdgeLabel<L> {
     pub value: L,
     pub position: (f64, f64),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RoutedEdge<T, L> {
+pub(crate) struct RoutedEdge<T, L> {
     pub id: EdgeIndex,
     pub tail: T,
     pub head: T,
@@ -97,7 +97,7 @@ pub struct RoutedEdge<T, L> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ClusterSpec<C> {
+pub(crate) struct ClusterSpec<C> {
     pub id: C,
     pub nodes: Vec<NodeIndex>,
     pub padding: Option<f64>,
@@ -105,7 +105,7 @@ pub struct ClusterSpec<C> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ClusterLayout<C> {
+pub(crate) struct ClusterLayout<C> {
     pub id: C,
     pub bounds: Rect,
     pub parent: Option<usize>,
@@ -138,7 +138,7 @@ impl Default for RenderConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DetailedLayout<T, L, C> {
+pub(crate) struct DetailedLayout<T, L, C> {
     pub nodes: Vec<RoutedNode<T>>,
     pub edges: Vec<RoutedEdge<T, L>>,
     pub clusters: Vec<ClusterLayout<C>>,
@@ -170,7 +170,7 @@ struct ComputedCluster<C> {
 ///
 /// This keeps the current layered node placement and adds post-processing
 /// features that are commonly needed by renderers.
-pub fn from_graph_with_features<V, E, L, C>(
+pub(crate) fn from_graph_with_features<V, E, L, C>(
     graph: &StableDiGraph<V, E>,
     vertex_size: &impl Fn(NodeIndex, &V) -> (f64, f64),
     edge_label: &impl Fn(EdgeIndex, &E) -> Option<L>,
@@ -264,7 +264,9 @@ where
         separate_nodes_from_foreign_clusters(
             &mut nodes,
             &computed_clusters,
-            render_config.cluster_boundary_gap.max(render_config.cluster_padding * 0.35),
+            render_config
+                .cluster_boundary_gap
+                .max(render_config.cluster_padding * 0.35),
             render_config.cluster_constraint_iterations.max(1) * 2,
         );
         refine_final_cluster_rank_slots(
@@ -467,8 +469,9 @@ where
                     (*node_id != edge.tail && *node_id != edge.head).then_some(*rect)
                 })
                 .chain(computed_clusters.iter().filter_map(|cluster| {
-                    (!cluster.node_ids.contains(&edge.tail) && !cluster.node_ids.contains(&edge.head))
-                        .then_some(cluster.bounds.expand(3.0))
+                    (!cluster.node_ids.contains(&edge.tail)
+                        && !cluster.node_ids.contains(&edge.head))
+                    .then_some(cluster.bounds.expand(3.0))
                 }))
                 .collect::<Vec<_>>();
             let curve_points = bezier_curve_points_from_polyline(
@@ -650,8 +653,7 @@ fn apply_graphviz_cluster_constraints<V, E, C>(
     let original_x = nodes.iter().map(|node| node.center.0).collect::<Vec<_>>();
     let node_cluster_memberships = build_node_cluster_memberships(nodes, &cluster_internals);
     let cluster_depths = build_cluster_depths(&cluster_internals);
-    let direct_child_lookup =
-        build_direct_child_lookup(&node_cluster_memberships, &cluster_depths);
+    let direct_child_lookup = build_direct_child_lookup(&node_cluster_memberships, &cluster_depths);
     let mut ranks = build_compound_ranks(
         nodes,
         graph,
@@ -725,20 +727,15 @@ fn restore_compound_rank_slot_order<V, E, C>(
         .enumerate()
         .map(|(index, node)| (node.id, index))
         .collect::<HashMap<_, _>>();
-    let mut cluster_internals = build_cluster_internals(
-        nodes,
-        clusters,
-        default_cluster_padding,
-        &node_index_by_id,
-    );
+    let mut cluster_internals =
+        build_cluster_internals(nodes, clusters, default_cluster_padding, &node_index_by_id);
     if cluster_internals.is_empty() {
         return;
     }
 
     let node_cluster_memberships = build_node_cluster_memberships(nodes, &cluster_internals);
     let cluster_depths = build_cluster_depths(&cluster_internals);
-    let direct_child_lookup =
-        build_direct_child_lookup(&node_cluster_memberships, &cluster_depths);
+    let direct_child_lookup = build_direct_child_lookup(&node_cluster_memberships, &cluster_depths);
     let mut ranks = group_nodes_into_ranks(nodes);
     if ranks.len() < 2 {
         return;
@@ -808,19 +805,10 @@ fn refine_final_cluster_rank_slots<V, E, C>(
 
     let node_cluster_memberships = build_node_cluster_memberships(nodes, &cluster_internals);
     let sibling_cluster_groups = declaration_sibling_cluster_groups(&cluster_internals);
-    apply_sibling_cluster_rank_ordering(
-        nodes,
-        &node_cluster_memberships,
-        &sibling_cluster_groups,
-    );
-    normalize_leaf_cluster_rank_slots_by_external_flow(
-        nodes,
-        graph,
-        &cluster_internals,
-    );
+    apply_sibling_cluster_rank_ordering(nodes, &node_cluster_memberships, &sibling_cluster_groups);
+    normalize_leaf_cluster_rank_slots_by_external_flow(nodes, graph, &cluster_internals);
     let cluster_depths = build_cluster_depths(&cluster_internals);
-    let direct_child_lookup =
-        build_direct_child_lookup(&node_cluster_memberships, &cluster_depths);
+    let direct_child_lookup = build_direct_child_lookup(&node_cluster_memberships, &cluster_depths);
     reorder_top_level_rank_blocks(nodes, graph, &cluster_internals, &direct_child_lookup);
     enforce_sibling_cluster_positions(
         nodes,
@@ -890,7 +878,11 @@ fn normalize_leaf_cluster_rank_slots_by_external_flow<V, E>(
     let rank_by_node = ranks
         .iter()
         .enumerate()
-        .flat_map(|(rank_index, rank)| rank.iter().copied().map(move |node_index| (node_index, rank_index)))
+        .flat_map(|(rank_index, rank)| {
+            rank.iter()
+                .copied()
+                .map(move |node_index| (node_index, rank_index))
+        })
         .collect::<HashMap<_, _>>();
     let node_index_by_id = nodes
         .iter()
@@ -987,7 +979,10 @@ fn reorder_top_level_rank_blocks<V, E>(
 
         for node_index in rank {
             if let Some(child_cluster) = direct_child_lookup.get(&(None, *node_index)).copied() {
-                child_members.entry(child_cluster).or_default().push(*node_index);
+                child_members
+                    .entry(child_cluster)
+                    .or_default()
+                    .push(*node_index);
                 if seen_clusters.insert(child_cluster) {
                     block_sequence.push(RankBlockKind::Cluster(child_cluster));
                 }
@@ -1264,19 +1259,11 @@ fn build_compound_ranks<V, E>(
         minimum_length,
     );
     let mut node_ranks = container_layout.node_ranks;
-    apply_sibling_cluster_rank_stagger(
-        &mut node_ranks,
-        graph,
-        clusters,
-        &node_index_by_id,
-    );
+    apply_sibling_cluster_rank_stagger(&mut node_ranks, graph, clusters, &node_index_by_id);
 
     let mut ranks = BTreeMap::<i32, Vec<usize>>::new();
     for node_index in 0..nodes.len() {
-        let rank = node_ranks
-            .get(&node_index)
-            .copied()
-            .unwrap_or(0);
+        let rank = node_ranks.get(&node_index).copied().unwrap_or(0);
         ranks.entry(rank).or_default().push(node_index);
     }
 
@@ -1325,12 +1312,8 @@ fn apply_sibling_cluster_rank_stagger<V, E>(
             .unwrap_or(0);
 
         for (offset, cluster_index) in ordered_group.into_iter().enumerate() {
-            let local_ranks = cluster_internal_rank_template(
-                cluster_index,
-                graph,
-                clusters,
-                node_index_by_id,
-            );
+            let local_ranks =
+                cluster_internal_rank_template(cluster_index, graph, clusters, node_index_by_id);
             let cluster_base = group_base + offset as i32;
             for node_index in &clusters[cluster_index].node_indices {
                 let local_rank = local_ranks.get(node_index).copied().unwrap_or(0);
@@ -1449,7 +1432,9 @@ fn compute_container_rank_layout<V, E>(
     items.sort_by(|left, right| {
         initial_item_x(left, clusters, original_x)
             .total_cmp(&initial_item_x(right, clusters, original_x))
-            .then_with(|| initial_item_order(left, clusters).cmp(&initial_item_order(right, clusters)))
+            .then_with(|| {
+                initial_item_order(left, clusters).cmp(&initial_item_order(right, clusters))
+            })
     });
 
     if items.is_empty() {
@@ -1468,7 +1453,9 @@ fn compute_container_rank_layout<V, E>(
         let Some(target_index) = node_index_by_id.get(&edge.target()).copied() else {
             continue;
         };
-        if !(container_node_set.contains(&source_index) && container_node_set.contains(&target_index)) {
+        if !(container_node_set.contains(&source_index)
+            && container_node_set.contains(&target_index))
+        {
             continue;
         }
 
@@ -1566,7 +1553,9 @@ fn solve_item_ranks(
     edge_constraints: &[ItemRankConstraint],
     clusters: &[ClusterInternal],
 ) -> HashMap<RankBlockKind, i32> {
-    let has_direct_nodes = items.iter().any(|item| matches!(item, RankBlockKind::Node(_)));
+    let has_direct_nodes = items
+        .iter()
+        .any(|item| matches!(item, RankBlockKind::Node(_)));
     let mut ranks = items
         .iter()
         .copied()
@@ -1586,15 +1575,18 @@ fn solve_item_ranks(
                 .iter()
                 .filter_map(|constraint| {
                     if constraint.target_item == *item {
-                        let source_base = previous.get(&constraint.source_item).copied().unwrap_or(0);
+                        let source_base =
+                            previous.get(&constraint.source_item).copied().unwrap_or(0);
                         Some(
                             source_base + constraint.source_local_rank + constraint.delta
                                 - constraint.target_local_rank,
                         )
                     } else if constraint.source_item == *item {
-                        let target_base = previous.get(&constraint.target_item).copied().unwrap_or(0);
+                        let target_base =
+                            previous.get(&constraint.target_item).copied().unwrap_or(0);
                         Some(
-                            target_base + constraint.target_local_rank - constraint.delta
+                            target_base + constraint.target_local_rank
+                                - constraint.delta
                                 - constraint.source_local_rank,
                         )
                     } else {
@@ -1878,7 +1870,9 @@ fn adjacent_rank_median_key<V, E>(
     }
 
     if positions.is_empty() {
-        return *original_x.get(node_index).unwrap_or(&nodes[node_index].center.0);
+        return *original_x
+            .get(node_index)
+            .unwrap_or(&nodes[node_index].center.0);
     }
 
     positions.sort_by(|left, right| left.total_cmp(right));
@@ -1911,7 +1905,10 @@ fn reorder_parent_rank<V, E>(
 
     for node_index in rank_nodes {
         if let Some(child_cluster) = direct_child_lookup.get(&(parent, *node_index)).copied() {
-            child_members.entry(child_cluster).or_default().push(*node_index);
+            child_members
+                .entry(child_cluster)
+                .or_default()
+                .push(*node_index);
             if seen_clusters.insert(child_cluster) {
                 block_sequence.push(RankBlockKind::Cluster(child_cluster));
             }
@@ -1962,22 +1959,16 @@ fn reorder_parent_rank<V, E>(
     }
 
     blocks.sort_by(|left, right| {
-        ordering_key(
-            left,
-            other_positions,
-            nodes,
-            graph,
-            node_index_by_id,
-        )
-        .total_cmp(&ordering_key(
-            right,
-            other_positions,
-            nodes,
-            graph,
-            node_index_by_id,
-        ))
-        .then_with(|| left.current_mean.total_cmp(&right.current_mean))
-        .then_with(|| left.tie_order.cmp(&right.tie_order))
+        ordering_key(left, other_positions, nodes, graph, node_index_by_id)
+            .total_cmp(&ordering_key(
+                right,
+                other_positions,
+                nodes,
+                graph,
+                node_index_by_id,
+            ))
+            .then_with(|| left.current_mean.total_cmp(&right.current_mean))
+            .then_with(|| left.tie_order.cmp(&right.tie_order))
     });
 
     blocks
@@ -1986,16 +1977,15 @@ fn reorder_parent_rank<V, E>(
         .collect()
 }
 
-fn mean_current_position(
-    members: &[usize],
-    current_positions: &HashMap<usize, f64>,
-) -> f64 {
-    let (total, count) = members.iter().fold((0.0, 0usize), |(total, count), node_index| {
-        (
-            total + current_positions.get(node_index).copied().unwrap_or(0.0),
-            count + 1,
-        )
-    });
+fn mean_current_position(members: &[usize], current_positions: &HashMap<usize, f64>) -> f64 {
+    let (total, count) = members
+        .iter()
+        .fold((0.0, 0usize), |(total, count), node_index| {
+            (
+                total + current_positions.get(node_index).copied().unwrap_or(0.0),
+                count + 1,
+            )
+        });
 
     if count == 0 {
         0.0
@@ -2363,14 +2353,11 @@ fn assign_rank_x_positions<V, E>(
 
         for (position, node_index) in rank.iter().copied().enumerate() {
             let target_x = match position {
-                0 => desired_positions
-                    .get(position)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        *original_x
-                            .get(node_index)
-                            .unwrap_or(&nodes[node_index].center.0)
-                    }),
+                0 => desired_positions.get(position).copied().unwrap_or_else(|| {
+                    *original_x
+                        .get(node_index)
+                        .unwrap_or(&nodes[node_index].center.0)
+                }),
                 _ => {
                     let previous_index = rank[position - 1];
                     let min_gap = minimum_gap(
@@ -2431,7 +2418,8 @@ fn assign_rank_x_positions<V, E>(
         }
 
         if !desired_positions.is_empty() {
-            let desired_center = desired_positions.iter().sum::<f64>() / desired_positions.len() as f64;
+            let desired_center =
+                desired_positions.iter().sum::<f64>() / desired_positions.len() as f64;
             let actual_center = rank
                 .iter()
                 .map(|node_index| nodes[*node_index].center.0)
@@ -3184,7 +3172,11 @@ fn reorder_rank_slots_by_adjacent_neighbor_x<V, E>(
     let rank_by_node = ranks
         .iter()
         .enumerate()
-        .flat_map(|(rank_index, rank)| rank.iter().copied().map(move |node_index| (node_index, rank_index)))
+        .flat_map(|(rank_index, rank)| {
+            rank.iter()
+                .copied()
+                .map(move |node_index| (node_index, rank_index))
+        })
         .collect::<HashMap<_, _>>();
 
     for rank in ranks.into_iter().filter(|rank| rank.len() > 1) {
@@ -3583,7 +3575,8 @@ fn compact_cluster_top_fanouts<C>(
         let mut ordered_members = next_members.clone();
         ordered_members.sort_by(|left, right| {
             nodes[*left]
-                .center.0
+                .center
+                .0
                 .total_cmp(&nodes[*right].center.0)
                 .then_with(|| left.cmp(right))
         });
@@ -4817,10 +4810,9 @@ fn preferred_anchor_sides_with_context(
     let head_center = rect_center(head_rect);
     let delta_x = head_center.0 - tail_center.0;
     let delta_y = head_center.1 - tail_center.1;
-    let same_rank_threshold = ((tail_rect.max_y - tail_rect.min_y)
-        .min(head_rect.max_y - head_rect.min_y)
-        * 0.3)
-        .max(12.0);
+    let same_rank_threshold =
+        ((tail_rect.max_y - tail_rect.min_y).min(head_rect.max_y - head_rect.min_y) * 0.3)
+            .max(12.0);
 
     if delta_y.abs() <= same_rank_threshold
         && same_rank_intermediate_blocker(tail, head, tail_rect, head_rect, node_bounds)
@@ -4911,8 +4903,7 @@ fn same_rank_intermediate_blocker(
     let min_x = tail_center.0.min(head_center.0);
     let max_x = tail_center.0.max(head_center.0);
     let row_center_y = (tail_center.1 + head_center.1) * 0.5;
-    let rank_band = ((tail_rect.max_y - tail_rect.min_y)
-        .min(head_rect.max_y - head_rect.min_y)
+    let rank_band = ((tail_rect.max_y - tail_rect.min_y).min(head_rect.max_y - head_rect.min_y)
         * 0.35)
         .max(16.0);
 
@@ -5266,8 +5257,7 @@ fn forced_inner_descendant_route(
     let outer_center_x = (outer_bounds.min_x + outer_bounds.max_x) * 0.5;
     let leaf_center_x = (leaf_bounds.min_x + leaf_bounds.max_x) * 0.5;
     let leaf_center_y = (leaf_bounds.min_y + leaf_bounds.max_y) * 0.5;
-    if leaf_center_x >= outer_center_x - EDGE_LABEL_OFFSET * 0.2
-        || end.1 <= leaf_center_y + EPSILON
+    if leaf_center_x >= outer_center_x - EDGE_LABEL_OFFSET * 0.2 || end.1 <= leaf_center_y + EPSILON
     {
         return None;
     }
@@ -5302,7 +5292,13 @@ fn forced_inner_descendant_route(
         outer_bounds.min_y + ROUTING_GUIDE_CLEARANCE,
         outer_bounds.max_y - ROUTING_GUIDE_CLEARANCE,
     );
-    let forced = vec![start, (corridor_x, start.1), (corridor_x, lane_y), (corridor_x, end.1), end];
+    let forced = vec![
+        start,
+        (corridor_x, start.1),
+        (corridor_x, lane_y),
+        (corridor_x, end.1),
+        end,
+    ];
     Some(compact_route_polyline_with_context(
         &forced,
         node_obstacles,
@@ -5331,8 +5327,10 @@ fn forced_same_rank_backward_route(
     }
 
     let (_, common_bounds) = smallest_common_cluster(tail, head, cluster_memberships)?;
-    let lane_y = (start.1.min(end.1) - EDGE_LABEL_OFFSET * 2.4)
-        .clamp(common_bounds.min_y + ROUTING_GUIDE_CLEARANCE, common_bounds.max_y - ROUTING_GUIDE_CLEARANCE);
+    let lane_y = (start.1.min(end.1) - EDGE_LABEL_OFFSET * 2.4).clamp(
+        common_bounds.min_y + ROUTING_GUIDE_CLEARANCE,
+        common_bounds.max_y - ROUTING_GUIDE_CLEARANCE,
+    );
     let forced = vec![start, (start.0, lane_y), (end.0, lane_y), end];
     Some(compact_route_polyline_with_context(
         &forced,
@@ -5405,7 +5403,8 @@ fn preferred_route_guides(
                         return None;
                     }
                     let sibling_center_x = (bounds.min_x + bounds.max_x) * 0.5;
-                    if leaf_center_x < outer_center_x && sibling_center_x > leaf_center_x + EPSILON {
+                    if leaf_center_x < outer_center_x && sibling_center_x > leaf_center_x + EPSILON
+                    {
                         Some((leaf_bounds.max_x + bounds.min_x) * 0.5)
                     } else if leaf_center_x > outer_center_x
                         && sibling_center_x < leaf_center_x - EPSILON
@@ -7040,7 +7039,8 @@ fn directional_route_penalty(
         } else {
             route_start.1 + total_dy * 0.32
         };
-        let wrong_way = (end.1 - start.1).signum() != total_dy.signum() && (end.1 - start.1).abs() > EPSILON;
+        let wrong_way =
+            (end.1 - start.1).signum() != total_dy.signum() && (end.1 - start.1).abs() > EPSILON;
         if wrong_way {
             penalty += segment_length * 2.8;
         }
@@ -7364,8 +7364,7 @@ fn compact_route_polyline_with_context(
                 label_obstacles,
                 excluded_node_obstacles,
                 excluded_cluster_obstacles,
-            )
-            {
+            ) {
                 compacted.remove(index + 1);
                 changed = true;
                 continue;
@@ -7565,9 +7564,9 @@ fn bezier_curve_is_clear(control_points: &[(f64, f64)], node_obstacles: &[Rect])
     }
 
     let sampled = sample_bezier_curve_points(control_points, 16);
-    sampled.windows(2).all(|segment| {
-        segment_clear_of_curve_obstacles(segment[0], segment[1], node_obstacles)
-    })
+    sampled
+        .windows(2)
+        .all(|segment| segment_clear_of_curve_obstacles(segment[0], segment[1], node_obstacles))
 }
 
 fn fit_dot_like_spline_section(
@@ -7678,7 +7677,11 @@ fn endpoint_direction(
     is_start: bool,
     side: Option<AnchorSide>,
 ) -> (f64, f64) {
-    let anchor = if is_start { points[0] } else { points[points.len() - 1] };
+    let anchor = if is_start {
+        points[0]
+    } else {
+        points[points.len() - 1]
+    };
     let route_direction = if is_start {
         polyline_point_at_distance(points, 56.0)
             .filter(|point| !same_point(*point, anchor))
@@ -7742,9 +7745,10 @@ fn spline_section_fits(
         return false;
     }
 
-    if sampled.windows(2).any(|segment| {
-        !segment_clear_of_curve_obstacles(segment[0], segment[1], node_obstacles)
-    }) {
+    if sampled
+        .windows(2)
+        .any(|segment| !segment_clear_of_curve_obstacles(segment[0], segment[1], node_obstacles))
+    {
         return false;
     }
 
@@ -7781,11 +7785,7 @@ fn point_to_polyline_distance(point: (f64, f64), polyline: &[(f64, f64)]) -> f64
         .fold(f64::INFINITY, f64::min)
 }
 
-fn point_to_segment_distance(
-    point: (f64, f64),
-    start: (f64, f64),
-    end: (f64, f64),
-) -> f64 {
+fn point_to_segment_distance(point: (f64, f64), start: (f64, f64), end: (f64, f64)) -> f64 {
     let segment = (end.0 - start.0, end.1 - start.1);
     let segment_length_squared = segment.0 * segment.0 + segment.1 * segment.1;
     if segment_length_squared <= EPSILON {
@@ -7948,8 +7948,7 @@ fn build_spline_guide_points(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
             continue;
         }
 
-        let offset = (euclidean_distance(previous, current)
-            .min(euclidean_distance(current, next))
+        let offset = (euclidean_distance(previous, current).min(euclidean_distance(current, next))
             * TURN_OFFSET_SCALE)
             .min(MAX_TURN_OFFSET);
 

@@ -1,16 +1,15 @@
 use std::env;
 
 use log::error;
-use petgraph::stable_graph::StableDiGraph;
 
 // Default values for configuration
-pub const MINIMUM_LENGTH_DEFAULT: u32 = 1;
-pub const VERTEX_SPACING_DEFAULT: f64 = 10.0;
-pub const DUMMY_VERTICES_DEFAULT: bool = true;
-pub const RANKING_TYPE_DEFAULT: RankingType = RankingType::MinimizeEdgeLength;
-pub const C_MINIMIZATION_DEFAULT: CrossingMinimization = CrossingMinimization::Median;
-pub const TRANSPOSE_DEFAULT: bool = true;
-pub const DUMMY_SIZE_DEFAULT: f64 = 1.0;
+const MINIMUM_LENGTH_DEFAULT: u32 = 1;
+const VERTEX_SPACING_DEFAULT: f64 = 10.0;
+const DUMMY_VERTICES_DEFAULT: bool = true;
+const RANKING_TYPE_DEFAULT: RankingType = RankingType::MinimizeEdgeLength;
+const C_MINIMIZATION_DEFAULT: CrossingMinimization = CrossingMinimization::Median;
+const TRANSPOSE_DEFAULT: bool = true;
+const DUMMY_SIZE_DEFAULT: f64 = 1.0;
 
 const ENV_MINIMUM_LENGTH: &str = "RUST_GRAPH_MIN_LEN";
 const ENV_VERTEX_SPACING: &str = "RUST_GRAPH_V_SPACING";
@@ -19,12 +18,6 @@ const ENV_RANKING_TYPE: &str = "RUST_GRAPH_R_TYPE";
 const ENV_CROSSING_MINIMIZATION: &str = "RUST_GRAPH_CROSS_MIN";
 const ENV_TRANSPOSE: &str = "RUST_GRAPH_TRANSPOSE";
 const ENV_DUMMY_SIZE: &str = "RUST_GRAPH_DUMMY_SIZE";
-
-pub trait IntoCoordinates {}
-
-impl<V, E> IntoCoordinates for StableDiGraph<V, E> {}
-impl IntoCoordinates for &[(u32, u32)] {}
-impl IntoCoordinates for (&[u32], &[(u32, u32)]) {}
 
 macro_rules! read_env {
     ($field:expr, $cb:tt, $env:ident) => {

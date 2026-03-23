@@ -180,13 +180,7 @@ struct Moarificator {
     pending_iced_screenshot: Option<Screenshot>,
 }
 impl Moarificator {
-    fn new(
-        headless: bool,
-        noimg: bool,
-        seed: u64,
-        node_count: u32,
-        cluster_count: usize,
-    ) -> Self {
+    fn new(headless: bool, noimg: bool, seed: u64, node_count: u32, cluster_count: usize) -> Self {
         Self {
             headless,
             noimg,
@@ -691,7 +685,7 @@ fn initial_graph(seed: u64, node_count: u32) -> Graph {
     Graph {
         nodes,
         edges,
-        config: rust_sugiyama::configure::Config {
+        config: rust_sugiyama::Config {
             vertex_spacing: 26.0,
             ..Default::default()
         },
@@ -1651,10 +1645,7 @@ fn build_clusters(graph: &Graph, cluster_seed: u64, cluster_count: usize) -> Vec
         nodes
     }
 
-    fn pick_items(
-        items: &mut Vec<ClusterItem>,
-        rng: &mut fastrand::Rng,
-    ) -> Vec<ClusterItem> {
+    fn pick_items(items: &mut Vec<ClusterItem>, rng: &mut fastrand::Rng) -> Vec<ClusterItem> {
         let selected_count = rng.usize(1..=items.len());
         let mut indices = (0..items.len()).collect::<Vec<_>>();
         rng.shuffle(&mut indices);
@@ -1670,13 +1661,15 @@ fn build_clusters(graph: &Graph, cluster_seed: u64, cluster_count: usize) -> Vec
     }
 
     fn count_nodes(items: &[ClusterItem]) -> usize {
-        items.iter()
+        items
+            .iter()
             .filter(|item| matches!(item, ClusterItem::Node(_)))
             .count()
     }
 
     fn count_clusters(items: &[ClusterItem]) -> usize {
-        items.iter()
+        items
+            .iter()
             .filter(|item| matches!(item, ClusterItem::Cluster(_)))
             .count()
     }
@@ -1807,8 +1800,8 @@ fn build_clusters(graph: &Graph, cluster_seed: u64, cluster_count: usize) -> Vec
         .iter()
         .enumerate()
         .map(|(index, spec)| {
-            let cluster = Cluster::new(collect_cluster_nodes(index, &specs, &mut cache))
-                .padding(10.0);
+            let cluster =
+                Cluster::new(collect_cluster_nodes(index, &specs, &mut cache)).padding(10.0);
             match spec.parent {
                 Some(parent) => cluster.parent(parent),
                 None => cluster,
@@ -1830,8 +1823,8 @@ fn edge_label(index: usize, (from, to): (u32, u32)) -> Option<String> {
     Some(format!("{from} -> {to}"))
 }
 
-fn render_config() -> rust_sugiyama::advanced::RenderConfig {
-    rust_sugiyama::advanced::RenderConfig {
+fn render_config() -> rust_sugiyama::RenderConfig {
+    rust_sugiyama::RenderConfig {
         routing_padding: 4.0,
         bend_penalty: 6.0,
         cluster_padding: 10.0,

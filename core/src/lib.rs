@@ -641,7 +641,7 @@ fn layout_component(
             cluster_crossings,
         });
     }
-    break_cycles_greedy(local_count, &mut acyclic_edges);
+    break_cycles_acyclic(local_count, &mut acyclic_edges);
 
     let oriented_edges: Vec<DirectedEdge> = acyclic_edges
         .iter()
@@ -855,66 +855,71 @@ fn layout_component(
     }
 }
 
-fn break_cycles_greedy(node_count: usize, edges: &mut [DirectedEdge]) {
-    if edges.is_empty() || node_count <= 1 {
+fn break_cycles_acyclic(node_count: usize, edges: &mut [DirectedEdge]) {
+    if node_count <= 1 || edges.is_empty() {
         return;
     }
 
     let mut guard = 0usize;
+    let guard_limit = edges.len().saturating_mul(3).max(8);
     loop {
         guard += 1;
-        if guard > edges.len().saturating_mul(4).max(8) {
+        if guard > guard_limit {
             break;
         }
 
-        let mut indegree = vec![0usize; node_count];
-        let mut outgoing = vec![Vec::<usize>::new(); node_count];
-        for (edge_id, edge) in edges.iter().enumerate() {
-            if edge.flat {
+        let mut mark = vec![false; node_count];
+        let mut onstack = vec![false; node_count];
+        let mut changed = false;
+
+        for start in 0..node_count {
+            if mark[start] {
                 continue;
             }
-            indegree[edge.head] += 1;
-            outgoing[edge.tail].push(edge_id);
+            dfs_break_cycles(start, edges, &mut mark, &mut onstack, &mut changed);
         }
 
-        let mut queue = VecDeque::new();
-        for (node, &deg) in indegree.iter().enumerate() {
-            if deg == 0 {
-                queue.push_back(node);
-            }
-        }
-
-        let mut removed = vec![false; node_count];
-        let mut removed_count = 0usize;
-        while let Some(node) = queue.pop_front() {
-            if removed[node] {
-                continue;
-            }
-            removed[node] = true;
-            removed_count += 1;
-            for &edge_id in &outgoing[node] {
-                let head = edges[edge_id].head;
-                if indegree[head] > 0 {
-                    indegree[head] -= 1;
-                    if indegree[head] == 0 {
-                        queue.push_back(head);
-                    }
-                }
-            }
-        }
-
-        if removed_count == node_count {
+        if !changed {
             break;
         }
-
-        let Some(edge) = edges
-            .iter_mut()
-            .find(|edge| !edge.flat && !removed[edge.tail] && !removed[edge.head])
-        else {
-            break;
-        };
-        std::mem::swap(&mut edge.tail, &mut edge.head);
     }
+}
+
+fn dfs_break_cycles(
+    node: usize,
+    edges: &mut [DirectedEdge],
+    mark: &mut [bool],
+    onstack: &mut [bool],
+    changed: &mut bool,
+) {
+    if mark[node] {
+        return;
+    }
+    mark[node] = true;
+    onstack[node] = true;
+
+    let mut outgoing = Vec::<(usize, usize, usize)>::new();
+    for (edge_idx, edge) in edges.iter().enumerate() {
+        if edge.flat || edge.tail != node {
+            continue;
+        }
+        outgoing.push((edge.index, edge_idx, edge.head));
+    }
+    outgoing.sort_unstable_by_key(|(orig_index, edge_idx, _)| (*orig_index, *edge_idx));
+
+    for (_, edge_idx, head) in outgoing {
+        if onstack[head] {
+            let edge = &mut edges[edge_idx];
+            std::mem::swap(&mut edge.tail, &mut edge.head);
+            *changed = true;
+            continue;
+        }
+        if !mark[head] {
+            dfs_break_cycles(head, edges, mark, onstack, changed);
+        }
+    }
+
+    onstack[node] = false;
 }
 
 fn assign_ranks(node_count: usize, edges: &[DirectedEdge], ranking_type: RankingType) -> Vec<i32> {
@@ -981,6 +986,9 @@ fn topo_order(node_count: usize, edges: &[DirectedEdge]) -> Vec<usize> {
     let mut indegree = vec![0usize; node_count];
     let mut outgoing = vec![Vec::<usize>::new(); node_count];
     for (edge_id, edge) in edges.iter().enumerate() {
+        if edge.flat {
+            continue;
+        }
         indegree[edge.head] += 1;
         outgoing[edge.tail].push(edge_id);
     }

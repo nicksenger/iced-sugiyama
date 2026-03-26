@@ -379,7 +379,7 @@ pub fn layout_graph(
 
     let node_cluster_paths = compute_node_cluster_paths(clusters, &node_by_id, nodes.len());
 
-    let components = connected_components(nodes.len(), &input_edges);
+    let components = connected_components(nodes.len(), &input_edges, &node_cluster_paths);
     let mut global_positions = BTreeMap::new();
     let mut routed_edges = Vec::<RoutedEdge>::new();
     let mut x_offset = 0.0;
@@ -539,6 +539,7 @@ struct SegmentEdge {
     to: usize,
     edge_index: usize,
     weight: i32,
+    cluster_crossings: usize,
     flat: bool,
     temp_kind: TempEdgeKind,
 }
@@ -587,11 +588,30 @@ fn sanitize_node_size((width, height): (f64, f64)) -> (f64, f64) {
     (width, height)
 }
 
-fn connected_components(node_count: usize, edges: &[InputEdge]) -> Vec<Vec<usize>> {
+fn connected_components(
+    node_count: usize,
+    edges: &[InputEdge],
+    node_cluster_paths: &[Vec<usize>],
+) -> Vec<Vec<usize>> {
     let mut adjacency = vec![Vec::<usize>::new(); node_count];
     for edge in edges {
         adjacency[edge.tail].push(edge.head);
         adjacency[edge.head].push(edge.tail);
+    }
+
+    // Cluster-aware decomposition: nodes participating in the same cluster
+    // skeleton should be processed in the same component, mirroring how dotgen
+    // integrates cluster structure before decomposition.
+    let mut cluster_anchor = HashMap::<usize, usize>::new();
+    for (node, path) in node_cluster_paths.iter().enumerate() {
+        for &cluster in path {
+            if let Some(&anchor) = cluster_anchor.get(&cluster) {
+                adjacency[node].push(anchor);
+                adjacency[anchor].push(node);
+            } else {
+                cluster_anchor.insert(cluster, node);
+            }
+        }
     }
 
     let mut visited = vec![false; node_count];
@@ -651,25 +671,19 @@ fn layout_component(
         };
         let flat = edge.tail == edge.head;
         let base_min_len = if flat { 0 } else { edge.min_len.max(1) };
-        let cluster_crossings = cluster_crossings_between(
-            &node_cluster_paths[edge.tail],
-            &node_cluster_paths[edge.head],
-        );
-        let crossing_penalty = (cluster_crossings as i32) * 2;
-        let temp_kind = if flat {
-            TempEdgeKind::Flat
-        } else if cluster_crossings > 0 {
-            TempEdgeKind::ClusterBridge
-        } else {
-            TempEdgeKind::Original
-        };
+        let (cluster_crossings, cluster_weight_penalty, cluster_len_penalty, temp_kind) =
+            classify_cluster_edge(
+                &node_cluster_paths[edge.tail],
+                &node_cluster_paths[edge.head],
+                flat,
+            );
         acyclic_edges.push(DirectedEdge {
             index: edge.index,
             tail,
             head,
-            min_len: base_min_len + crossing_penalty,
+            min_len: base_min_len + cluster_len_penalty,
             base_min_len,
-            weight: 1 + crossing_penalty.max(0),
+            weight: (1 + cluster_weight_penalty).max(1),
             label: edge.label.clone(),
             original_tail: tail,
             original_head: head,
@@ -788,6 +802,7 @@ fn layout_component(
                         to: label_node,
                         edge_index: edge.index,
                         weight: (edge.weight + 1).max(1),
+                        cluster_crossings: edge.cluster_crossings,
                         flat: true,
                         temp_kind: edge.temp_kind,
                     });
@@ -796,6 +811,7 @@ fn layout_component(
                         to: head_layer,
                         edge_index: edge.index,
                         weight: (edge.weight + 1).max(1),
+                        cluster_crossings: edge.cluster_crossings,
                         flat: true,
                         temp_kind: edge.temp_kind,
                     });
@@ -806,6 +822,7 @@ fn layout_component(
                         to: head_layer,
                         edge_index: edge.index,
                         weight: edge.weight.max(1),
+                        cluster_crossings: edge.cluster_crossings,
                         flat: true,
                         temp_kind: edge.temp_kind,
                     });
@@ -850,6 +867,7 @@ fn layout_component(
                 to: id,
                 edge_index: edge.index,
                 weight: edge.weight.max(1),
+                cluster_crossings: edge.cluster_crossings,
                 flat: false,
                 temp_kind: edge.temp_kind,
             });
@@ -861,6 +879,7 @@ fn layout_component(
             to: head_layer,
             edge_index: edge.index,
             weight: edge.weight.max(1),
+            cluster_crossings: edge.cluster_crossings,
             flat: false,
             temp_kind: edge.temp_kind,
         });
@@ -1698,7 +1717,7 @@ fn medians_for_layer(
             } else {
                 segment.to
             };
-            values.push((nodes[other].order as i32, segment.weight.max(1)));
+            values.push((nodes[other].order as i32, segment_mincross_weight(segment)));
         }
 
         nodes[node].median_value = match values.len() {
@@ -1912,6 +1931,138 @@ fn cluster_spacing_extra(nodes: &[LayerNode], left: usize, right: usize, base_ga
     }
 }
 
+fn segment_mincross_weight(segment: &SegmentEdge) -> i32 {
+    let kind_bonus = match segment.temp_kind {
+        TempEdgeKind::ClusterBridge => 2,
+        TempEdgeKind::Reversed => 1,
+        _ => 0,
+    };
+    (segment.weight + (segment.cluster_crossings as i32 * 2) + kind_bonus).max(1)
+}
+
+fn cluster_parent_map(nodes: &[LayerNode]) -> HashMap<usize, Option<usize>> {
+    let mut parents = HashMap::new();
+    for node in nodes {
+        for (i, &cluster) in node.cluster_path.iter().enumerate() {
+            let parent = if i == 0 {
+                None
+            } else {
+                Some(node.cluster_path[i - 1])
+            };
+            parents.entry(cluster).or_insert(parent);
+        }
+    }
+    parents
+}
+
+fn enforce_sibling_cluster_separation(
+    rank: usize,
+    layers: &[Vec<usize>],
+    nodes: &mut [LayerNode],
+    boundary_gap: f64,
+    cluster_parents: &HashMap<usize, Option<usize>>,
+) {
+    if boundary_gap <= 0.0 {
+        return;
+    }
+    let layer = &layers[rank];
+    if layer.len() <= 1 {
+        return;
+    }
+
+    let mut ranges = HashMap::<usize, (f64, f64)>::new();
+    for &node in layer {
+        let left = nodes[node].x - nodes[node].width / 2.0;
+        let right = nodes[node].x + nodes[node].width / 2.0;
+        for &cluster in &nodes[node].cluster_path {
+            ranges
+                .entry(cluster)
+                .and_modify(|range| {
+                    range.0 = range.0.min(left);
+                    range.1 = range.1.max(right);
+                })
+                .or_insert((left, right));
+        }
+    }
+
+    let mut siblings_by_parent = HashMap::<Option<usize>, Vec<usize>>::new();
+    for (&cluster, parent) in cluster_parents {
+        if ranges.contains_key(&cluster) {
+            siblings_by_parent.entry(*parent).or_default().push(cluster);
+        }
+    }
+
+    for siblings in siblings_by_parent.values_mut() {
+        if siblings.len() <= 1 {
+            continue;
+        }
+        siblings.sort_unstable_by(|a, b| {
+            let ca = ranges
+                .get(a)
+                .map(|(l, r)| (l + r) / 2.0)
+                .unwrap_or(f64::INFINITY);
+            let cb = ranges
+                .get(b)
+                .map(|(l, r)| (l + r) / 2.0)
+                .unwrap_or(f64::INFINITY);
+            ca.partial_cmp(&cb).unwrap_or(Ordering::Equal)
+        });
+
+        for pair in siblings.windows(2) {
+            let left_cluster = pair[0];
+            let right_cluster = pair[1];
+            let Some(&(_left_min, left_max)) = ranges.get(&left_cluster) else {
+                continue;
+            };
+            let Some(&(right_min, _right_max)) = ranges.get(&right_cluster) else {
+                continue;
+            };
+            let gap = right_min - left_max;
+            let needed = boundary_gap - gap;
+            if needed <= 0.0 {
+                continue;
+            }
+
+            for &node in layer {
+                if nodes[node].cluster_path.contains(&right_cluster) {
+                    nodes[node].x += needed;
+                }
+            }
+
+            for (&cluster, range) in ranges.iter_mut() {
+                if is_cluster_descendant_or_self(cluster, right_cluster, cluster_parents) {
+                    range.0 += needed;
+                    range.1 += needed;
+                }
+            }
+        }
+    }
+}
+
+fn is_cluster_descendant_or_self(
+    cluster: usize,
+    ancestor: usize,
+    parents: &HashMap<usize, Option<usize>>,
+) -> bool {
+    if cluster == ancestor {
+        return true;
+    }
+    let mut cursor = Some(cluster);
+    let mut guard = 0usize;
+    while let Some(current) = cursor {
+        if guard > parents.len() {
+            break;
+        }
+        let parent = parents.get(&current).copied().flatten();
+        if parent == Some(ancestor) {
+            return true;
+        }
+        cursor = parent;
+        guard += 1;
+    }
+    false
+}
+
 fn transpose_layers(
     layers: &mut [Vec<usize>],
     nodes: &mut [LayerNode],
@@ -1977,12 +2128,12 @@ fn weighted_in_cross(
     for &edge_b in &incoming_segments[right] {
         let eb = &segments[edge_b];
         let inv = nodes[eb.from].order as i32;
-        let cnt = eb.weight.max(1) as i64;
+        let cnt = segment_mincross_weight(eb) as i64;
         for &edge_a in &incoming_segments[left] {
             let ea = &segments[edge_a];
             let t = nodes[ea.from].order as i32 - inv;
             if t > 0 || (t == 0 && ea.edge_index > eb.edge_index) {
-                cross += ea.weight.max(1) as i64 * cnt;
+                cross += segment_mincross_weight(ea) as i64 * cnt;
             }
         }
     }
@@ -2000,12 +2151,12 @@ fn weighted_out_cross(
     for &edge_b in &outgoing_segments[right] {
         let eb = &segments[edge_b];
         let inv = nodes[eb.to].order as i32;
-        let cnt = eb.weight.max(1) as i64;
+        let cnt = segment_mincross_weight(eb) as i64;
         for &edge_a in &outgoing_segments[left] {
             let ea = &segments[edge_a];
             let t = nodes[ea.to].order as i32 - inv;
             if t > 0 || (t == 0 && ea.edge_index > eb.edge_index) {
-                cross += ea.weight.max(1) as i64 * cnt;
+                cross += segment_mincross_weight(ea) as i64 * cnt;
             }
         }
     }
@@ -2044,7 +2195,7 @@ fn pair_crossings(rank: usize, nodes: &[LayerNode], segments: &[SegmentEdge]) ->
             let from_order = nodes[edge.from].order;
             let to_order = nodes[edge.to].order;
             max_target_order = max_target_order.max(to_order);
-            pairs.push((from_order, to_order, edge.weight.max(1) as i64));
+            pairs.push((from_order, to_order, segment_mincross_weight(edge) as i64));
         }
     }
 
@@ -2146,18 +2297,14 @@ fn assign_coordinates(
             flat_in[edge.to].push(edge.from);
             continue;
         }
-        let weight_bonus = match edge.temp_kind {
-            TempEdgeKind::ClusterBridge => 1,
-            TempEdgeKind::Reversed => 1,
-            _ => 0,
-        };
-        let weight = (edge.weight + weight_bonus).max(1);
+        let weight = segment_mincross_weight(edge);
         next_neighbors[edge.from].push((edge.to, weight));
         prev_neighbors[edge.to].push((edge.from, weight));
     }
 
     let flat_constraints =
         collect_flat_constraints(edges, real_layer_node, nodes, config.vertex_spacing);
+    let cluster_parents = cluster_parent_map(nodes);
     let iterations = 64usize;
     for pass in 0..iterations {
         let downward = pass % 2 == 0;
@@ -2184,6 +2331,13 @@ fn assign_coordinates(
                         layers,
                         nodes,
                         render_config.cluster_boundary_gap,
+                    );
+                    enforce_sibling_cluster_separation(
+                        rank,
+                        layers,
+                        nodes,
+                        render_config.cluster_boundary_gap,
+                        &cluster_parents,
                     );
                     enforce_layer_spacing(
                         rank,
@@ -2215,6 +2369,13 @@ fn assign_coordinates(
                         layers,
                         nodes,
                         render_config.cluster_boundary_gap,
+                    );
+                    enforce_sibling_cluster_separation(
+                        rank,
+                        layers,
+                        nodes,
+                        render_config.cluster_boundary_gap,
+                        &cluster_parents,
                     );
                     enforce_layer_spacing(
                         rank,
@@ -2501,10 +2662,12 @@ fn flat_edge_points(chain: &[usize], nodes: &[LayerNode], routing_padding: f64) 
     if chain.is_empty() {
         return Vec::new();
     }
+    let cluster_cross = flat_chain_cluster_crossings(chain, nodes) as f64;
     if chain.len() == 1 {
         let id = chain[0];
         let n = &nodes[id];
-        let r = (n.width.max(n.height) / 2.0 + routing_padding).max(8.0);
+        let r = (n.width.max(n.height) / 2.0 + routing_padding + cluster_cross * routing_padding)
+            .max(8.0);
         return vec![
             (n.x + r, n.y),
             (n.x + r, n.y + r),
@@ -2514,14 +2677,26 @@ fn flat_edge_points(chain: &[usize], nodes: &[LayerNode], routing_padding: f64) 
     }
     let a = &nodes[chain[0]];
     let b = &nodes[chain[chain.len() - 1]];
-    let lift = (routing_padding * 2.0 + (a.height.max(b.height) * 0.5)).max(12.0);
+    let lift =
+        (routing_padding * (2.0 + cluster_cross * 0.75) + (a.height.max(b.height) * 0.5)).max(12.0);
+    let horizontal_pad = cluster_cross * routing_padding.max(1.0);
+    let mid_x = (a.x + b.x) * 0.5;
     vec![
         (a.x, a.y),
         (a.x, a.y + lift),
-        ((a.x + b.x) * 0.5, a.y + lift),
+        (mid_x + horizontal_pad.copysign(b.x - a.x), a.y + lift),
         (b.x, b.y + lift),
         (b.x, b.y),
     ]
+}
+
+fn flat_chain_cluster_crossings(chain: &[usize], nodes: &[LayerNode]) -> usize {
+    if chain.len() < 2 {
+        return 0;
+    }
+    let first = chain[0];
+    let last = chain[chain.len() - 1];
+    cluster_boundary_crossings(&nodes[first].cluster_path, &nodes[last].cluster_path)
 }
 
 fn flat_edge_label_position(points: &[(f64, f64)], routing_padding: f64) -> Option<(f64, f64)> {
@@ -2693,6 +2868,33 @@ fn cluster_crossings_between(a: &[usize], b: &[usize]) -> usize {
     tail_out + head_in
 }
 
+fn classify_cluster_edge(
+    tail_path: &[usize],
+    head_path: &[usize],
+    flat: bool,
+) -> (usize, i32, i32, TempEdgeKind) {
+    if flat {
+        return (0, 0, 0, TempEdgeKind::Flat);
+    }
+    let crossings = cluster_crossings_between(tail_path, head_path);
+    if crossings == 0 {
+        return (0, 0, 0, TempEdgeKind::Original);
+    }
+
+    // Dotgen-style cluster bridge weighting: crossings increase the edge's
+    // pressure during ranking/mincross more than they increase pure minlen.
+    let shared = shared_prefix_len(tail_path, head_path);
+    let top_level_bridge_boost = if shared == 0 { 2 } else { 0 };
+    let weight_penalty = (crossings as i32 * 2) + top_level_bridge_boost;
+    let minlen_penalty = crossings as i32;
+    (
+        crossings,
+        weight_penalty,
+        minlen_penalty,
+        TempEdgeKind::ClusterBridge,
+    )
+}
+
 fn dummy_cluster_path_between(
     tail_path: &[usize],
     head_path: &[usize],
@@ -2818,7 +3020,9 @@ fn cluster_final_bounds(
             visiting,
             render_config,
         ) {
-            bound = Some(merge_bounds(bound, child_bound));
+            // Preserve explicit gap between parent and child cluster boxes.
+            let expanded_child = expand_bounds(child_bound, render_config.cluster_boundary_gap);
+            bound = Some(merge_bounds(bound, expanded_child));
         }
     }
     visiting.remove(&index);
@@ -2832,10 +3036,35 @@ fn cluster_final_bounds(
         b.min_y -= padding;
         b.max_x += padding;
         b.max_y += padding;
+        // Keep clusters non-degenerate for stable clipping and nested boundary
+        // handling in later phases.
+        let min_size = (render_config.cluster_boundary_gap * 2.0).max(1.0);
+        if b.max_x - b.min_x < min_size {
+            let c = (b.min_x + b.max_x) / 2.0;
+            b.min_x = c - min_size / 2.0;
+            b.max_x = c + min_size / 2.0;
+        }
+        if b.max_y - b.min_y < min_size {
+            let c = (b.min_y + b.max_y) / 2.0;
+            b.min_y = c - min_size / 2.0;
+            b.max_y = c + min_size / 2.0;
+        }
         b
     });
     memo[index] = Some(bound);
     bound
+}
+
+fn expand_bounds(bounds: Bounds, amount: f64) -> Bounds {
+    if amount <= 0.0 {
+        return bounds;
+    }
+    Bounds {
+        min_x: bounds.min_x - amount,
+        min_y: bounds.min_y - amount,
+        max_x: bounds.max_x + amount,
+        max_y: bounds.max_y + amount,
+    }
 }
 
 fn merge_bounds(current: Option<Bounds>, next: Bounds) -> Bounds {

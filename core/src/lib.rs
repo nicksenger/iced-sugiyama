@@ -721,6 +721,16 @@ fn layout_component(
     info!(target: "layout", "Starting phase 1 [dot_rank]");
     let mut ranks = assign_ranks(local_count, &oriented_edges, config.ranking_type);
     normalize_ranks(&mut ranks);
+    // dot/flat.c reserves an extra rank above rank 0 when non-adjacent flat
+    // labels need virtual label nodes.
+    let needs_flat_label_above_zero = oriented_edges
+        .iter()
+        .any(|edge| edge.flat && edge.label.is_some() && ranks[edge.tail] == 0);
+    if needs_flat_label_above_zero {
+        for rank in &mut ranks {
+            *rank += 1;
+        }
+    }
 
     info!(target: "layout", "Starting phase 2 [dot_mincross]");
     let mut layer_nodes = Vec::<LayerNode>::new();
@@ -770,7 +780,11 @@ fn layout_component(
             if edge.flat {
                 let mut chain = vec![tail_layer];
                 if edge.label.is_some() {
-                    let rank = tail_rank as usize;
+                    let edge_rank = tail_rank as usize;
+                    let rank = edge_rank.saturating_sub(1);
+                    while rank >= layers.len() {
+                        layers.push(Vec::new());
+                    }
                     let label_width = edge
                         .label
                         .as_ref()
@@ -797,24 +811,46 @@ fn layout_component(
                         median_value: 0.0,
                     });
                     layers[rank].push(label_node);
-                    segment_edges.push(SegmentEdge {
-                        from: tail_layer,
-                        to: label_node,
-                        edge_index: edge.index,
-                        weight: (edge.weight + 1).max(1),
-                        cluster_crossings: edge.cluster_crossings,
-                        flat: true,
-                        temp_kind: edge.temp_kind,
-                    });
-                    segment_edges.push(SegmentEdge {
-                        from: label_node,
-                        to: head_layer,
-                        edge_index: edge.index,
-                        weight: (edge.weight + 1).max(1),
-                        cluster_crossings: edge.cluster_crossings,
-                        flat: true,
-                        temp_kind: edge.temp_kind,
-                    });
+                    let label_segments_flat = rank == edge_rank;
+                    if rank <= edge_rank {
+                        segment_edges.push(SegmentEdge {
+                            from: label_node,
+                            to: tail_layer,
+                            edge_index: edge.index,
+                            weight: (edge.weight + 1).max(1),
+                            cluster_crossings: edge.cluster_crossings,
+                            flat: label_segments_flat,
+                            temp_kind: edge.temp_kind,
+                        });
+                        segment_edges.push(SegmentEdge {
+                            from: label_node,
+                            to: head_layer,
+                            edge_index: edge.index,
+                            weight: (edge.weight + 1).max(1),
+                            cluster_crossings: edge.cluster_crossings,
+                            flat: label_segments_flat,
+                            temp_kind: edge.temp_kind,
+                        });
+                    } else {
+                        segment_edges.push(SegmentEdge {
+                            from: tail_layer,
+                            to: label_node,
+                            edge_index: edge.index,
+                            weight: (edge.weight + 1).max(1),
+                            cluster_crossings: edge.cluster_crossings,
+                            flat: label_segments_flat,
+                            temp_kind: edge.temp_kind,
+                        });
+                        segment_edges.push(SegmentEdge {
+                            from: head_layer,
+                            to: label_node,
+                            edge_index: edge.index,
+                            weight: (edge.weight + 1).max(1),
+                            cluster_crossings: edge.cluster_crossings,
+                            flat: label_segments_flat,
+                            temp_kind: edge.temp_kind,
+                        });
+                    }
                     chain.push(label_node);
                 } else {
                     segment_edges.push(SegmentEdge {
@@ -2677,6 +2713,28 @@ fn flat_edge_points(chain: &[usize], nodes: &[LayerNode], routing_padding: f64) 
     }
     let a = &nodes[chain[0]];
     let b = &nodes[chain[chain.len() - 1]];
+    if chain.len() >= 3 {
+        let mut mx = 0.0;
+        let mut my = 0.0;
+        let mut count = 0.0;
+        for &id in &chain[1..chain.len() - 1] {
+            mx += nodes[id].x;
+            my += nodes[id].y;
+            count += 1.0;
+        }
+        if count > 0.0 {
+            let mid = (mx / count, my / count);
+            if (mid.1 - a.y).abs() > 1e-6 || (mid.1 - b.y).abs() > 1e-6 {
+                return vec![
+                    (a.x, a.y),
+                    (a.x, mid.1),
+                    (mid.0, mid.1),
+                    (b.x, mid.1),
+                    (b.x, b.y),
+                ];
+            }
+        }
+    }
     let lift =
         (routing_padding * (2.0 + cluster_cross * 0.75) + (a.height.max(b.height) * 0.5)).max(12.0);
     let horizontal_pad = cluster_cross * routing_padding.max(1.0);

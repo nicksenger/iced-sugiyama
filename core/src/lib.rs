@@ -450,16 +450,12 @@ pub fn layout_graph(
     let mut edge_layouts = Vec::with_capacity(routed_edges.len());
     for route in routed_edges {
         let curve = polyline_to_curve(&route.points);
-        let label_position = route
-            .label
-            .as_ref()
-            .and_then(|_| point_at_fraction(&route.points, 0.5));
         edge_layouts.push(EdgeLayout {
             index: route.index,
             points: route.points,
             curve_points: curve,
             label: route.label,
-            label_position,
+            label_position: route.label_position,
         });
     }
 
@@ -499,11 +495,27 @@ struct DirectedEdge {
     head: usize,
     min_len: i32,
     base_min_len: i32,
+    weight: i32,
     label: Option<String>,
     original_tail: usize,
     original_head: usize,
     flat: bool,
     cluster_crossings: usize,
+    temp_kind: TempEdgeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TempEdgeKind {
+    Original,
+    Reversed,
+    ClusterBridge,
+    Flat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerNodeKind {
+    Real,
+    Dummy { edge_index: usize, step: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -516,12 +528,18 @@ struct LayerNode {
     y: f64,
     real_node: Option<usize>,
     top_cluster: Option<usize>,
+    kind: LayerNodeKind,
+    median_value: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct SegmentEdge {
     from: usize,
     to: usize,
+    edge_index: usize,
+    weight: i32,
+    flat: bool,
+    temp_kind: TempEdgeKind,
 }
 
 #[derive(Debug, Clone)]
@@ -529,6 +547,7 @@ struct RoutedEdge {
     index: usize,
     points: Vec<(f64, f64)>,
     label: Option<String>,
+    label_position: Option<(f64, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -544,6 +563,13 @@ struct Bounds {
     min_y: f64,
     max_x: f64,
     max_y: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlatConstraint {
+    left: usize,
+    right: usize,
+    min_gap: f64,
 }
 
 fn sanitize_node_size((width, height): (f64, f64)) -> (f64, f64) {
@@ -628,17 +654,27 @@ fn layout_component(
             &node_cluster_paths[edge.tail],
             &node_cluster_paths[edge.head],
         );
+        let crossing_penalty = (cluster_crossings as i32) * 2;
+        let temp_kind = if flat {
+            TempEdgeKind::Flat
+        } else if cluster_crossings > 0 {
+            TempEdgeKind::ClusterBridge
+        } else {
+            TempEdgeKind::Original
+        };
         acyclic_edges.push(DirectedEdge {
             index: edge.index,
             tail,
             head,
-            min_len: base_min_len + cluster_crossings as i32,
+            min_len: base_min_len + crossing_penalty,
             base_min_len,
+            weight: 1 + crossing_penalty.max(0),
             label: edge.label.clone(),
             original_tail: tail,
             original_head: head,
             flat,
             cluster_crossings,
+            temp_kind,
         });
     }
     break_cycles_acyclic(local_count, &mut acyclic_edges);
@@ -653,11 +689,13 @@ fn layout_component(
                     head: edge.tail,
                     min_len: edge.min_len,
                     base_min_len: edge.base_min_len,
+                    weight: edge.weight,
                     label: edge.label.clone(),
                     original_tail: edge.original_tail,
                     original_head: edge.original_head,
                     flat: edge.flat,
                     cluster_crossings: edge.cluster_crossings,
+                    temp_kind: TempEdgeKind::Reversed,
                 }
             } else {
                 edge.clone()
@@ -690,6 +728,8 @@ fn layout_component(
             y: 0.0,
             real_node: Some(local),
             top_cluster,
+            kind: LayerNodeKind::Real,
+            median_value: 0.0,
         });
         layers[rank].push(id);
         real_layer_node[local] = id;
@@ -716,6 +756,10 @@ fn layout_component(
                 segment_edges.push(SegmentEdge {
                     from: tail_layer,
                     to: head_layer,
+                    edge_index: edge.index,
+                    weight: edge.weight.max(1),
+                    flat: true,
+                    temp_kind: edge.temp_kind,
                 });
                 chains.insert(edge.index, vec![tail_layer, head_layer]);
             }
@@ -745,11 +789,20 @@ fn layout_component(
                 y: 0.0,
                 real_node: None,
                 top_cluster: lca,
+                kind: LayerNodeKind::Dummy {
+                    edge_index: edge.index,
+                    step,
+                },
+                median_value: 0.0,
             });
             layers[rank].push(id);
             segment_edges.push(SegmentEdge {
                 from: current,
                 to: id,
+                edge_index: edge.index,
+                weight: edge.weight.max(1),
+                flat: false,
+                temp_kind: edge.temp_kind,
             });
             chain.push(id);
             current = id;
@@ -757,18 +810,25 @@ fn layout_component(
         segment_edges.push(SegmentEdge {
             from: current,
             to: head_layer,
+            edge_index: edge.index,
+            weight: edge.weight.max(1),
+            flat: false,
+            temp_kind: edge.temp_kind,
         });
         chain.push(head_layer);
         chains.insert(edge.index, chain);
     }
 
     initialize_layer_orders(&mut layers, &mut layer_nodes);
+    let flat_order_constraints =
+        collect_flat_order_constraints(&oriented_edges, &real_layer_node, &layer_nodes);
     run_mincross(
         &mut layers,
         &mut layer_nodes,
         &segment_edges,
         config.c_minimization,
         config.transpose,
+        &flat_order_constraints,
     );
 
     info!(target: "layout", "Starting phase 3 [dot_position]");
@@ -841,10 +901,21 @@ fn layout_component(
             offset_polyline(&mut points, offset);
         }
 
+        let label_position = if edge.label.is_some() {
+            if edge.flat {
+                flat_edge_label_position(&points, render_config.routing_padding)
+            } else {
+                point_at_fraction(&points, 0.5)
+            }
+        } else {
+            None
+        };
+
         routed_edges.push(RoutedEdge {
             index: edge.index,
             points,
             label: edge.label.clone(),
+            label_position,
         });
     }
 
@@ -911,6 +982,7 @@ fn dfs_break_cycles(
         if onstack[head] {
             let edge = &mut edges[edge_idx];
             std::mem::swap(&mut edge.tail, &mut edge.head);
+            edge.temp_kind = TempEdgeKind::Reversed;
             *changed = true;
             continue;
         }
@@ -929,17 +1001,19 @@ fn assign_ranks(node_count: usize, edges: &[DirectedEdge], ranking_type: Ranking
 
     let topo = topo_order(node_count, edges);
     let mut rank = vec![0i32; node_count];
-    let mut outgoing = vec![Vec::<&DirectedEdge>::new(); node_count];
-    let mut incoming = vec![Vec::<&DirectedEdge>::new(); node_count];
-    for edge in edges {
-        outgoing[edge.tail].push(edge);
-        incoming[edge.head].push(edge);
+    let mut outgoing = vec![Vec::<usize>::new(); node_count];
+    let mut incoming = vec![Vec::<usize>::new(); node_count];
+    for (edge_idx, edge) in edges.iter().enumerate() {
+        outgoing[edge.tail].push(edge_idx);
+        incoming[edge.head].push(edge_idx);
     }
 
     if matches!(ranking_type, RankingType::Original) {
         for (idx, &node) in topo.iter().enumerate() {
             rank[node] = idx as i32;
         }
+        relax_forward(&mut rank, &topo, &outgoing, edges);
+        return rank;
     }
 
     let sources: HashSet<usize> = incoming
@@ -947,38 +1021,65 @@ fn assign_ranks(node_count: usize, edges: &[DirectedEdge], ranking_type: Ranking
         .enumerate()
         .filter_map(|(node, inputs)| if inputs.is_empty() { Some(node) } else { None })
         .collect();
+    let sinks: HashSet<usize> = outgoing
+        .iter()
+        .enumerate()
+        .filter_map(|(node, outputs)| if outputs.is_empty() { Some(node) } else { None })
+        .collect();
 
     for &source in &sources {
-        if !matches!(ranking_type, RankingType::Original) {
-            rank[source] = 0;
-        }
+        rank[source] = 0;
     }
-    relax_forward(&mut rank, &topo, &outgoing);
+    relax_forward(&mut rank, &topo, &outgoing, edges);
 
     if matches!(
         ranking_type,
         RankingType::MinimizeEdgeLength | RankingType::Down | RankingType::Up
     ) {
-        balance_sources(&mut rank, &sources, &topo, &outgoing);
+        balance_sources(&mut rank, &sources, &topo, &outgoing, edges);
     }
 
     if matches!(ranking_type, RankingType::MinimizeEdgeLength) {
-        network_simplex_refine(&mut rank, edges, &topo, &sources);
+        network_simplex_refine(&mut rank, edges, &topo, &sources, &incoming, &outgoing);
+    } else {
+        // Dot2-style fallback: keep levels feasible and compact by alternating
+        // forward/backward longest-path scans.
+        let mut reverse_topo = topo.clone();
+        reverse_topo.reverse();
+        for _ in 0..(node_count * 2).max(8) {
+            let mut changed = false;
+            for &node in &reverse_topo {
+                if sinks.contains(&node) {
+                    continue;
+                }
+                let upper = outgoing[node]
+                    .iter()
+                    .map(|&eid| rank[edges[eid].head] - edges[eid].min_len)
+                    .min()
+                    .unwrap_or(rank[node]);
+                if upper < rank[node] {
+                    rank[node] = upper;
+                    changed = true;
+                }
+            }
+            for &source in &sources {
+                rank[source] = 0;
+            }
+            relax_forward(&mut rank, &topo, &outgoing, edges);
+            if !changed {
+                break;
+            }
+        }
     }
 
-    let sinks: Vec<usize> = outgoing
-        .iter()
-        .enumerate()
-        .filter_map(|(node, outputs)| if outputs.is_empty() { Some(node) } else { None })
-        .collect();
-    if !sinks.is_empty() && !matches!(ranking_type, RankingType::Original) {
+    if !sinks.is_empty() {
         let sink_rank = sinks.iter().map(|&node| rank[node]).max().unwrap_or(0);
         for sink in sinks {
             rank[sink] = sink_rank;
         }
     }
 
-    relax_forward(&mut rank, &topo, &outgoing);
+    relax_forward(&mut rank, &topo, &outgoing, edges);
     rank
 }
 
@@ -1015,9 +1116,12 @@ fn topo_order(node_count: usize, edges: &[DirectedEdge]) -> Vec<usize> {
     }
 
     if order.len() < node_count {
-        let missing: HashSet<_> = order.iter().copied().collect();
-        for node in 0..node_count {
-            if !missing.contains(&node) {
+        let mut seen = vec![false; node_count];
+        for &node in &order {
+            seen[node] = true;
+        }
+        for (node, was_seen) in seen.into_iter().enumerate() {
+            if !was_seen {
                 order.push(node);
             }
         }
@@ -1026,10 +1130,16 @@ fn topo_order(node_count: usize, edges: &[DirectedEdge]) -> Vec<usize> {
     order
 }
 
-fn relax_forward(rank: &mut [i32], topo: &[usize], outgoing: &[Vec<&DirectedEdge>]) {
+fn relax_forward(
+    rank: &mut [i32],
+    topo: &[usize],
+    outgoing: &[Vec<usize>],
+    edges: &[DirectedEdge],
+) {
     for &node in topo {
         let base = rank[node];
-        for edge in &outgoing[node] {
+        for &edge_idx in &outgoing[node] {
+            let edge = &edges[edge_idx];
             let candidate = base + edge.min_len;
             if candidate > rank[edge.head] {
                 rank[edge.head] = candidate;
@@ -1042,7 +1152,8 @@ fn balance_sources(
     rank: &mut [i32],
     sources: &HashSet<usize>,
     topo: &[usize],
-    outgoing: &[Vec<&DirectedEdge>],
+    outgoing: &[Vec<usize>],
+    edges: &[DirectedEdge],
 ) {
     if sources.is_empty() {
         return;
@@ -1061,7 +1172,7 @@ fn balance_sources(
     for &source in sources {
         rank[source] = 0;
     }
-    relax_forward(rank, topo, outgoing);
+    relax_forward(rank, topo, outgoing, edges);
 }
 
 fn network_simplex_refine(
@@ -1069,17 +1180,12 @@ fn network_simplex_refine(
     edges: &[DirectedEdge],
     topo: &[usize],
     pinned_sources: &HashSet<usize>,
+    incoming: &[Vec<usize>],
+    outgoing: &[Vec<usize>],
 ) {
     let node_count = rank.len();
     if node_count <= 1 {
         return;
-    }
-
-    let mut outgoing = vec![Vec::<&DirectedEdge>::new(); node_count];
-    let mut incoming = vec![Vec::<&DirectedEdge>::new(); node_count];
-    for edge in edges {
-        outgoing[edge.tail].push(edge);
-        incoming[edge.head].push(edge);
     }
 
     let mut reverse_topo = topo.to_vec();
@@ -1088,6 +1194,7 @@ fn network_simplex_refine(
 
     for pass in 0..iterations {
         let scan = if pass % 2 == 0 { topo } else { &reverse_topo };
+        let mut changed = false;
         for &node in scan {
             if pinned_sources.contains(&node) {
                 continue;
@@ -1095,12 +1202,18 @@ fn network_simplex_refine(
 
             let lower_bound = incoming[node]
                 .iter()
-                .map(|edge| rank[edge.tail] + edge.min_len)
+                .map(|&edge_idx| {
+                    let edge = &edges[edge_idx];
+                    rank[edge.tail] + edge.min_len
+                })
                 .max()
                 .unwrap_or(i32::MIN / 4);
             let upper_bound = outgoing[node]
                 .iter()
-                .map(|edge| rank[edge.head] - edge.min_len)
+                .map(|&edge_idx| {
+                    let edge = &edges[edge_idx];
+                    rank[edge.head] - edge.min_len
+                })
                 .min()
                 .unwrap_or(i32::MAX / 4);
             if lower_bound > upper_bound {
@@ -1109,25 +1222,137 @@ fn network_simplex_refine(
 
             let in_w = incoming[node]
                 .iter()
-                .map(|edge| 1 + (edge.min_len - edge.base_min_len).max(0))
+                .map(|&edge_idx| {
+                    let edge = &edges[edge_idx];
+                    edge.weight + (edge.min_len - edge.base_min_len).max(0)
+                })
                 .sum::<i32>();
             let out_w = outgoing[node]
                 .iter()
-                .map(|edge| 1 + (edge.min_len - edge.base_min_len).max(0))
+                .map(|&edge_idx| {
+                    let edge = &edges[edge_idx];
+                    edge.weight + (edge.min_len - edge.base_min_len).max(0)
+                })
                 .sum::<i32>();
+            let weighted_neighbor_center = {
+                let mut num = 0.0;
+                let mut den = 0.0;
+                for &edge_idx in &incoming[node] {
+                    let edge = &edges[edge_idx];
+                    let w = edge.weight.max(1) as f64;
+                    num += (rank[edge.tail] + edge.min_len) as f64 * w;
+                    den += w;
+                }
+                for &edge_idx in &outgoing[node] {
+                    let edge = &edges[edge_idx];
+                    let w = edge.weight.max(1) as f64;
+                    num += (rank[edge.head] - edge.min_len) as f64 * w;
+                    den += w;
+                }
+                if den > 0.0 {
+                    Some((num / den).round() as i32)
+                } else {
+                    None
+                }
+            };
             let target = match in_w.cmp(&out_w) {
                 Ordering::Greater => lower_bound,
                 Ordering::Less => upper_bound,
                 Ordering::Equal => rank[node].clamp(lower_bound, upper_bound),
             };
-            rank[node] = target;
+            let target = weighted_neighbor_center
+                .unwrap_or(target)
+                .clamp(lower_bound, upper_bound);
+            if target != rank[node] {
+                rank[node] = target;
+                changed = true;
+            }
         }
 
         for &source in pinned_sources {
             rank[source] = 0;
         }
-        relax_forward(rank, topo, &outgoing);
+        relax_forward(rank, topo, outgoing, edges);
+        if !changed && pass >= 3 {
+            break;
+        }
     }
+
+    // Final local pivots reduce total weighted slack while keeping feasibility.
+    for _ in 0..(node_count * 2).max(8) {
+        let mut changed = false;
+        for &node in topo {
+            if pinned_sources.contains(&node) {
+                continue;
+            }
+            let lower_bound = incoming[node]
+                .iter()
+                .map(|&edge_idx| {
+                    let edge = &edges[edge_idx];
+                    rank[edge.tail] + edge.min_len
+                })
+                .max()
+                .unwrap_or(i32::MIN / 4);
+            let upper_bound = outgoing[node]
+                .iter()
+                .map(|&edge_idx| {
+                    let edge = &edges[edge_idx];
+                    rank[edge.head] - edge.min_len
+                })
+                .min()
+                .unwrap_or(i32::MAX / 4);
+            if lower_bound > upper_bound {
+                continue;
+            }
+
+            let current = rank[node].clamp(lower_bound, upper_bound);
+            let lower_cost = local_slack_cost(node, lower_bound, rank, edges, incoming, outgoing);
+            let current_cost = local_slack_cost(node, current, rank, edges, incoming, outgoing);
+            let upper_cost = local_slack_cost(node, upper_bound, rank, edges, incoming, outgoing);
+
+            let (best_rank, _) = [
+                (lower_bound, lower_cost),
+                (current, current_cost),
+                (upper_bound, upper_cost),
+            ]
+            .into_iter()
+            .min_by_key(|(_, c)| *c)
+            .unwrap_or((current, current_cost));
+            if best_rank != rank[node] {
+                rank[node] = best_rank;
+                changed = true;
+            }
+        }
+        for &source in pinned_sources {
+            rank[source] = 0;
+        }
+        relax_forward(rank, topo, outgoing, edges);
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn local_slack_cost(
+    node: usize,
+    rank_candidate: i32,
+    rank: &[i32],
+    edges: &[DirectedEdge],
+    incoming: &[Vec<usize>],
+    outgoing: &[Vec<usize>],
+) -> i64 {
+    let mut cost = 0i64;
+    for &edge_idx in &incoming[node] {
+        let edge = &edges[edge_idx];
+        let slack = (rank_candidate - rank[edge.tail] - edge.min_len).max(0);
+        cost += slack as i64 * edge.weight.max(1) as i64;
+    }
+    for &edge_idx in &outgoing[node] {
+        let edge = &edges[edge_idx];
+        let slack = (rank[edge.head] - rank_candidate - edge.min_len).max(0);
+        cost += slack as i64 * edge.weight.max(1) as i64;
+    }
+    cost
 }
 
 fn max_rank(rank: &[i32]) -> usize {
@@ -1161,34 +1386,83 @@ fn run_mincross(
     segments: &[SegmentEdge],
     strategy: CrossingMinimization,
     transpose: bool,
+    flat_constraints: &HashSet<(usize, usize)>,
 ) {
     if layers.len() <= 1 {
         return;
     }
 
-    let mut incoming = vec![Vec::<usize>::new(); layer_nodes.len()];
-    let mut outgoing = vec![Vec::<usize>::new(); layer_nodes.len()];
-    for edge in segments {
-        incoming[edge.to].push(edge.from);
-        outgoing[edge.from].push(edge.to);
+    let mut incoming_segments = vec![Vec::<usize>::new(); layer_nodes.len()];
+    let mut outgoing_segments = vec![Vec::<usize>::new(); layer_nodes.len()];
+    for (segment_idx, segment) in segments.iter().enumerate() {
+        if segment.flat {
+            continue;
+        }
+        incoming_segments[segment.to].push(segment_idx);
+        outgoing_segments[segment.from].push(segment_idx);
     }
 
     let mut best_layers = layers.to_vec();
     let mut best_crossings = total_crossings(layers, layer_nodes, segments);
     let mut stale_passes = 0usize;
 
-    for _ in 0..24 {
-        for rank in 1..layers.len() {
-            order_layer(layers, layer_nodes, rank, &incoming, strategy);
-        }
-        for rank in (0..layers.len().saturating_sub(1)).rev() {
-            order_layer(layers, layer_nodes, rank, &outgoing, strategy);
+    for pass in 0..24 {
+        let reverse = pass % 4 < 2;
+
+        if pass % 2 == 0 {
+            for rank in 1..layers.len() {
+                let has_fixed = medians_for_layer(
+                    layers,
+                    layer_nodes,
+                    segments,
+                    rank,
+                    true,
+                    strategy,
+                    &incoming_segments,
+                    flat_constraints,
+                );
+                reorder_layer(
+                    layers,
+                    layer_nodes,
+                    rank,
+                    reverse,
+                    has_fixed,
+                    flat_constraints,
+                );
+            }
+        } else if layers.len() > 1 {
+            for rank in (0..layers.len() - 1).rev() {
+                let has_fixed = medians_for_layer(
+                    layers,
+                    layer_nodes,
+                    segments,
+                    rank,
+                    false,
+                    strategy,
+                    &outgoing_segments,
+                    flat_constraints,
+                );
+                reorder_layer(
+                    layers,
+                    layer_nodes,
+                    rank,
+                    reverse,
+                    has_fixed,
+                    flat_constraints,
+                );
+            }
         }
 
         if transpose {
-            for rank in 0..layers.len() {
-                transpose_layer(layers, layer_nodes, segments, rank);
-            }
+            transpose_layers(
+                layers,
+                layer_nodes,
+                segments,
+                !reverse,
+                &incoming_segments,
+                &outgoing_segments,
+                flat_constraints,
+            );
         }
 
         let current = total_crossings(layers, layer_nodes, segments);
@@ -1205,111 +1479,307 @@ fn run_mincross(
     }
 
     layers.clone_from_slice(&best_layers);
-    for layer in layers.iter() {
-        for (order, &node) in layer.iter().enumerate() {
-            layer_nodes[node].order = order;
-        }
-    }
+    refresh_orders(layers, layer_nodes);
 }
 
-fn order_layer(
-    layers: &mut [Vec<usize>],
-    nodes: &mut [LayerNode],
-    rank: usize,
-    neighbors: &[Vec<usize>],
-    strategy: CrossingMinimization,
-) {
-    let mut entries: Vec<(usize, f64, usize)> = layers[rank]
-        .iter()
-        .map(|&node| {
-            let adj = &neighbors[node];
-            let key = if adj.is_empty() {
-                nodes[node].order as f64
-            } else {
-                match strategy {
-                    CrossingMinimization::Barycenter => {
-                        adj.iter()
-                            .map(|&other| nodes[other].order as f64)
-                            .sum::<f64>()
-                            / adj.len() as f64
-                    }
-                    CrossingMinimization::Median => {
-                        let mut values: Vec<usize> =
-                            adj.iter().map(|&other| nodes[other].order).collect();
-                        values.sort_unstable();
-                        if values.len() % 2 == 1 {
-                            values[values.len() / 2] as f64
-                        } else {
-                            (values[values.len() / 2 - 1] + values[values.len() / 2]) as f64 / 2.0
-                        }
-                    }
-                }
-            };
-            (node, key, nodes[node].order)
-        })
-        .collect();
-
-    entries.sort_by(|a, b| {
-        a.1.partial_cmp(&b.1)
-            .unwrap_or(Ordering::Equal)
-            .then(a.2.cmp(&b.2))
-    });
-    layers[rank] = entries.iter().map(|entry| entry.0).collect();
-    for (order, &node) in layers[rank].iter().enumerate() {
-        nodes[node].order = order;
-    }
-}
-
-fn transpose_layer(
-    layers: &mut [Vec<usize>],
+fn medians_for_layer(
+    layers: &[Vec<usize>],
     nodes: &mut [LayerNode],
     segments: &[SegmentEdge],
     rank: usize,
+    use_incoming: bool,
+    strategy: CrossingMinimization,
+    adjacency: &[Vec<usize>],
+    flat_constraints: &HashSet<(usize, usize)>,
+) -> bool {
+    let mut has_fixed = false;
+    for &node in &layers[rank] {
+        let mut values = Vec::new();
+        for &segment_idx in &adjacency[node] {
+            let segment = &segments[segment_idx];
+            let other = if use_incoming {
+                segment.from
+            } else {
+                segment.to
+            };
+            values.push(nodes[other].order as i32);
+        }
+
+        nodes[node].median_value = match values.len() {
+            0 => -1.0,
+            1 => values[0] as f64,
+            2 => (values[0] + values[1]) as f64 / 2.0,
+            _ => {
+                values.sort_unstable();
+                match strategy {
+                    CrossingMinimization::Barycenter => {
+                        values.iter().map(|v| *v as f64).sum::<f64>() / values.len() as f64
+                    }
+                    CrossingMinimization::Median => weighted_median_value(&values),
+                }
+            }
+        };
+    }
+
+    for &node in &layers[rank] {
+        if nodes[node].median_value >= 0.0 {
+            continue;
+        }
+        if let Some(flat_median) = flat_constraint_median(node, nodes, flat_constraints) {
+            nodes[node].median_value = flat_median;
+        } else {
+            has_fixed = true;
+        }
+    }
+
+    has_fixed
+}
+
+fn weighted_median_value(sorted_values: &[i32]) -> f64 {
+    if sorted_values.len() % 2 == 1 {
+        return sorted_values[sorted_values.len() / 2] as f64;
+    }
+    let rm = sorted_values.len() / 2;
+    let lm = rm - 1;
+    let rspan = sorted_values[sorted_values.len() - 1] - sorted_values[rm];
+    let lspan = sorted_values[lm] - sorted_values[0];
+    if lspan == rspan {
+        (sorted_values[lm] + sorted_values[rm]) as f64 / 2.0
+    } else {
+        let left = sorted_values[lm] as f64 * rspan as f64;
+        let right = sorted_values[rm] as f64 * lspan as f64;
+        (left + right) / (lspan + rspan) as f64
+    }
+}
+
+fn flat_constraint_median(
+    node: usize,
+    nodes: &[LayerNode],
+    flat_constraints: &HashSet<(usize, usize)>,
+) -> Option<f64> {
+    let mut left_max: Option<usize> = None;
+    let mut right_min: Option<usize> = None;
+    for &(left, right) in flat_constraints {
+        if right == node && nodes[left].rank == nodes[node].rank {
+            left_max = Some(left_max.map_or(left, |cur| {
+                if nodes[left].order > nodes[cur].order {
+                    left
+                } else {
+                    cur
+                }
+            }));
+        } else if left == node && nodes[right].rank == nodes[node].rank {
+            right_min = Some(right_min.map_or(right, |cur| {
+                if nodes[right].order < nodes[cur].order {
+                    right
+                } else {
+                    cur
+                }
+            }));
+        }
+    }
+
+    if let Some(left) = left_max {
+        return Some((nodes[left].order + 1) as f64);
+    }
+    if let Some(right) = right_min {
+        return Some((nodes[right].order.saturating_sub(1)) as f64);
+    }
+    None
+}
+
+fn reorder_layer(
+    layers: &mut [Vec<usize>],
+    nodes: &mut [LayerNode],
+    rank: usize,
+    reverse: bool,
+    has_fixed: bool,
+    flat_constraints: &HashSet<(usize, usize)>,
 ) {
     if layers[rank].len() <= 1 {
         return;
     }
 
-    let mut improved = true;
-    while improved {
-        improved = false;
-        let mut i = 0usize;
-        while i + 1 < layers[rank].len() {
-            let before = local_crossings(layers, nodes, segments, rank);
-            layers[rank].swap(i, i + 1);
-            nodes[layers[rank][i]].order = i;
-            nodes[layers[rank][i + 1]].order = i + 1;
-            let after = local_crossings(layers, nodes, segments, rank);
-            if after < before {
-                improved = true;
-                i += 1;
-            } else {
-                layers[rank].swap(i, i + 1);
-                nodes[layers[rank][i]].order = i;
-                nodes[layers[rank][i + 1]].order = i + 1;
+    let n = layers[rank].len();
+    let mut ep = n;
+    for _ in (0..n).rev() {
+        let mut lp = 0usize;
+        while lp < ep {
+            while lp < ep && nodes[layers[rank][lp]].median_value < 0.0 {
+                lp += 1;
             }
-            i += 1;
+            if lp >= ep {
+                break;
+            }
+
+            let mut rp = lp + 1;
+            let mut must_stay = false;
+            while rp < ep {
+                let left = layers[rank][lp];
+                let right = layers[rank][rp];
+                if left_to_right(nodes, left, right, flat_constraints) {
+                    must_stay = true;
+                    break;
+                }
+                if nodes[right].median_value >= 0.0 {
+                    break;
+                }
+                rp += 1;
+            }
+            if rp >= ep {
+                break;
+            }
+
+            if !must_stay {
+                let left = layers[rank][lp];
+                let right = layers[rank][rp];
+                let p1 = nodes[left].median_value;
+                let p2 = nodes[right].median_value;
+                if p1 > p2 || (reverse && p1 >= p2) {
+                    layers[rank].swap(lp, rp);
+                    refresh_layer_order(&layers[rank], nodes);
+                }
+            }
+
+            lp = rp;
+        }
+        if !has_fixed && !reverse {
+            ep = ep.saturating_sub(1);
         }
     }
 }
 
-fn local_crossings(
-    layers: &[Vec<usize>],
+fn left_to_right(
     nodes: &[LayerNode],
-    segments: &[SegmentEdge],
-    rank: usize,
-) -> usize {
-    let mut total = 0usize;
-    if rank > 0 {
-        total += pair_crossings(rank - 1, nodes, segments);
+    left: usize,
+    right: usize,
+    flat_constraints: &HashSet<(usize, usize)>,
+) -> bool {
+    if flat_constraints.contains(&(left, right)) {
+        return true;
     }
-    if rank + 1 < layers.len() {
-        total += pair_crossings(rank, nodes, segments);
+    if matches!(
+        (nodes[left].top_cluster, nodes[right].top_cluster),
+        (Some(a), Some(b)) if a != b
+    ) {
+        return nodes[left].order < nodes[right].order;
     }
-    total
+    false
 }
 
-fn total_crossings(layers: &[Vec<usize>], nodes: &[LayerNode], segments: &[SegmentEdge]) -> usize {
+fn transpose_layers(
+    layers: &mut [Vec<usize>],
+    nodes: &mut [LayerNode],
+    segments: &[SegmentEdge],
+    reverse: bool,
+    incoming_segments: &[Vec<usize>],
+    outgoing_segments: &[Vec<usize>],
+    flat_constraints: &HashSet<(usize, usize)>,
+) {
+    let mut candidate = vec![true; layers.len()];
+    loop {
+        let mut delta = 0i64;
+        for rank in 0..layers.len() {
+            if !candidate[rank] {
+                continue;
+            }
+            candidate[rank] = false;
+            if layers[rank].len() <= 1 {
+                continue;
+            }
+            for i in 0..layers[rank].len() - 1 {
+                let v = layers[rank][i];
+                let w = layers[rank][i + 1];
+                if left_to_right(nodes, v, w, flat_constraints) {
+                    continue;
+                }
+
+                let mut c0 = 0i64;
+                let mut c1 = 0i64;
+                c0 += weighted_in_cross(v, w, incoming_segments, segments, nodes);
+                c1 += weighted_in_cross(w, v, incoming_segments, segments, nodes);
+                c0 += weighted_out_cross(v, w, outgoing_segments, segments, nodes);
+                c1 += weighted_out_cross(w, v, outgoing_segments, segments, nodes);
+
+                if c1 < c0 || (c0 > 0 && reverse && c1 == c0) {
+                    layers[rank].swap(i, i + 1);
+                    refresh_layer_order(&layers[rank], nodes);
+                    delta += c0 - c1;
+                    candidate[rank] = true;
+                    if rank > 0 {
+                        candidate[rank - 1] = true;
+                    }
+                    if rank + 1 < layers.len() {
+                        candidate[rank + 1] = true;
+                    }
+                }
+            }
+        }
+        if delta < 1 {
+            break;
+        }
+    }
+}
+
+fn weighted_in_cross(
+    left: usize,
+    right: usize,
+    incoming_segments: &[Vec<usize>],
+    segments: &[SegmentEdge],
+    nodes: &[LayerNode],
+) -> i64 {
+    let mut cross = 0i64;
+    for &edge_b in &incoming_segments[right] {
+        let eb = &segments[edge_b];
+        let inv = nodes[eb.from].order as i32;
+        let cnt = eb.weight.max(1) as i64;
+        for &edge_a in &incoming_segments[left] {
+            let ea = &segments[edge_a];
+            let t = nodes[ea.from].order as i32 - inv;
+            if t > 0 || (t == 0 && ea.edge_index > eb.edge_index) {
+                cross += ea.weight.max(1) as i64 * cnt;
+            }
+        }
+    }
+    cross
+}
+
+fn weighted_out_cross(
+    left: usize,
+    right: usize,
+    outgoing_segments: &[Vec<usize>],
+    segments: &[SegmentEdge],
+    nodes: &[LayerNode],
+) -> i64 {
+    let mut cross = 0i64;
+    for &edge_b in &outgoing_segments[right] {
+        let eb = &segments[edge_b];
+        let inv = nodes[eb.to].order as i32;
+        let cnt = eb.weight.max(1) as i64;
+        for &edge_a in &outgoing_segments[left] {
+            let ea = &segments[edge_a];
+            let t = nodes[ea.to].order as i32 - inv;
+            if t > 0 || (t == 0 && ea.edge_index > eb.edge_index) {
+                cross += ea.weight.max(1) as i64 * cnt;
+            }
+        }
+    }
+    cross
+}
+
+fn refresh_orders(layers: &[Vec<usize>], nodes: &mut [LayerNode]) {
+    for layer in layers {
+        refresh_layer_order(layer, nodes);
+    }
+}
+
+fn refresh_layer_order(layer: &[usize], nodes: &mut [LayerNode]) {
+    for (order, &node) in layer.iter().enumerate() {
+        nodes[node].order = order;
+    }
+}
+
+fn total_crossings(layers: &[Vec<usize>], nodes: &[LayerNode], segments: &[SegmentEdge]) -> i64 {
     if layers.len() <= 1 {
         return 0;
     }
@@ -1318,15 +1788,18 @@ fn total_crossings(layers: &[Vec<usize>], nodes: &[LayerNode], segments: &[Segme
         .sum()
 }
 
-fn pair_crossings(rank: usize, nodes: &[LayerNode], segments: &[SegmentEdge]) -> usize {
-    let mut pairs = Vec::<(usize, usize)>::new();
+fn pair_crossings(rank: usize, nodes: &[LayerNode], segments: &[SegmentEdge]) -> i64 {
+    let mut pairs = Vec::<(usize, usize, i64)>::new();
     let mut max_target_order = 0usize;
     for edge in segments {
+        if edge.flat {
+            continue;
+        }
         if nodes[edge.from].rank == rank && nodes[edge.to].rank == rank + 1 {
             let from_order = nodes[edge.from].order;
             let to_order = nodes[edge.to].order;
             max_target_order = max_target_order.max(to_order);
-            pairs.push((from_order, to_order));
+            pairs.push((from_order, to_order, edge.weight.max(1) as i64));
         }
     }
 
@@ -1334,38 +1807,35 @@ fn pair_crossings(rank: usize, nodes: &[LayerNode], segments: &[SegmentEdge]) ->
         return 0;
     }
     pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    inversion_count(
-        &pairs.into_iter().map(|(_, to)| to).collect::<Vec<_>>(),
-        max_target_order + 2,
-    )
+    weighted_inversion_count(&pairs, max_target_order + 2)
 }
 
-fn inversion_count(values: &[usize], size: usize) -> usize {
+fn weighted_inversion_count(values: &[(usize, usize, i64)], size: usize) -> i64 {
     if values.len() <= 1 {
         return 0;
     }
-    let mut fenwick = vec![0usize; size + 2];
-    let mut seen = 0usize;
-    let mut inversions = 0usize;
-    for &value in values {
-        let idx = value + 1;
-        let prefix = fenwick_sum(&fenwick, idx);
-        inversions += seen - prefix;
-        fenwick_add(&mut fenwick, idx, 1);
-        seen += 1;
+    let mut fenwick = vec![0i64; size + 2];
+    let mut seen = 0i64;
+    let mut inversions = 0i64;
+    for &(_, to, weight) in values {
+        let idx = to + 1;
+        let prefix = fenwick_sum_i64(&fenwick, idx);
+        inversions += weight * (seen - prefix);
+        fenwick_add_i64(&mut fenwick, idx, weight);
+        seen += weight;
     }
     inversions
 }
 
-fn fenwick_add(tree: &mut [usize], mut index: usize, delta: usize) {
+fn fenwick_add_i64(tree: &mut [i64], mut index: usize, delta: i64) {
     while index < tree.len() {
         tree[index] += delta;
         index += index & index.wrapping_neg();
     }
 }
 
-fn fenwick_sum(tree: &[usize], mut index: usize) -> usize {
-    let mut sum = 0usize;
+fn fenwick_sum_i64(tree: &[i64], mut index: usize) -> i64 {
+    let mut sum = 0i64;
     while index > 0 {
         sum += tree[index];
         index &= index - 1;
@@ -1421,46 +1891,104 @@ fn assign_coordinates(
         }
     }
 
-    let mut neighbors = vec![Vec::<usize>::new(); nodes.len()];
+    let mut prev_neighbors = vec![Vec::<(usize, i32)>::new(); nodes.len()];
+    let mut next_neighbors = vec![Vec::<(usize, i32)>::new(); nodes.len()];
     for edge in segments {
-        neighbors[edge.from].push(edge.to);
-        neighbors[edge.to].push(edge.from);
+        if edge.flat {
+            continue;
+        }
+        let weight_bonus = match edge.temp_kind {
+            TempEdgeKind::ClusterBridge => 1,
+            TempEdgeKind::Reversed => 1,
+            _ => 0,
+        };
+        let weight = (edge.weight + weight_bonus).max(1);
+        next_neighbors[edge.from].push((edge.to, weight));
+        prev_neighbors[edge.to].push((edge.from, weight));
     }
 
-    let flat_constraints = collect_flat_constraints(edges, real_layer_node, nodes);
-    for pass in 0..48 {
-        let forward = pass % 2 == 0;
-        let ranks: Vec<usize> = if forward {
-            (0..layers.len()).collect()
-        } else {
-            (0..layers.len()).rev().collect()
-        };
+    let flat_constraints =
+        collect_flat_constraints(edges, real_layer_node, nodes, config.vertex_spacing);
+    let iterations = 64usize;
+    for pass in 0..iterations {
+        let downward = pass % 2 == 0;
+        let progress = pass as f64 / (iterations.saturating_sub(1).max(1) as f64);
+        let damping = 1.0 - progress;
+        let alpha_real = (0.18 + 0.22 * damping).clamp(0.15, 0.45);
+        let alpha_dummy = (0.42 + 0.18 * damping).clamp(0.25, 0.70);
 
-        for rank in ranks {
-            for &node in &layers[rank] {
-                if neighbors[node].is_empty() {
-                    continue;
+        if downward {
+            for rank in 0..layers.len() {
+                for &node in &layers[rank] {
+                    let primary = weighted_neighbor_target(&prev_neighbors[node], nodes);
+                    let secondary = weighted_neighbor_target(&next_neighbors[node], nodes);
+                    let target = primary.or(secondary);
+                    let Some(target) = target else {
+                        continue;
+                    };
+                    let alpha = if matches!(nodes[node].kind, LayerNodeKind::Real) {
+                        alpha_real
+                    } else {
+                        alpha_dummy
+                    };
+                    nodes[node].x = (1.0 - alpha) * nodes[node].x + alpha * target;
                 }
-                let target = neighbors[node]
-                    .iter()
-                    .map(|&neighbor| nodes[neighbor].x)
-                    .sum::<f64>()
-                    / neighbors[node].len() as f64;
-                let alpha = if nodes[node].real_node.is_some() {
-                    0.35
-                } else {
-                    0.65
-                };
-                nodes[node].x = (1.0 - alpha) * nodes[node].x + alpha * target;
+                apply_flat_constraints(&flat_constraints, rank, layers, nodes);
+                for _ in 0..render_config.cluster_constraint_iterations.max(1) {
+                    enforce_cluster_rank_blocks(
+                        rank,
+                        layers,
+                        nodes,
+                        render_config.cluster_boundary_gap,
+                    );
+                    enforce_layer_spacing(
+                        rank,
+                        layers,
+                        nodes,
+                        config.vertex_spacing,
+                        render_config.cluster_boundary_gap,
+                    );
+                }
+                recenter_rank(rank, layers, nodes);
             }
-            apply_flat_constraints(&flat_constraints, rank, layers, nodes);
-            for _ in 0..render_config.cluster_constraint_iterations.max(1) {
-                enforce_cluster_rank_blocks(
-                    rank,
-                    layers,
-                    nodes,
-                    render_config.cluster_boundary_gap,
-                );
+        } else {
+            for rank in (0..layers.len()).rev() {
+                for &node in &layers[rank] {
+                    let primary = weighted_neighbor_target(&next_neighbors[node], nodes);
+                    let secondary = weighted_neighbor_target(&prev_neighbors[node], nodes);
+                    let target = primary.or(secondary);
+                    let Some(target) = target else {
+                        continue;
+                    };
+                    let alpha = if matches!(nodes[node].kind, LayerNodeKind::Real) {
+                        alpha_real
+                    } else {
+                        alpha_dummy
+                    };
+                    nodes[node].x = (1.0 - alpha) * nodes[node].x + alpha * target;
+                }
+                apply_flat_constraints(&flat_constraints, rank, layers, nodes);
+                for _ in 0..render_config.cluster_constraint_iterations.max(1) {
+                    enforce_cluster_rank_blocks(
+                        rank,
+                        layers,
+                        nodes,
+                        render_config.cluster_boundary_gap,
+                    );
+                    enforce_layer_spacing(
+                        rank,
+                        layers,
+                        nodes,
+                        config.vertex_spacing,
+                        render_config.cluster_boundary_gap,
+                    );
+                }
+                recenter_rank(rank, layers, nodes);
+            }
+        }
+
+        if pass % 8 == 7 {
+            for rank in 0..layers.len() {
                 enforce_layer_spacing(
                     rank,
                     layers,
@@ -1489,6 +2017,44 @@ fn assign_coordinates(
         .iter()
         .map(|node| node.x + node.width / 2.0)
         .fold(0.0, f64::max)
+}
+
+fn weighted_neighbor_target(neighbors: &[(usize, i32)], nodes: &[LayerNode]) -> Option<f64> {
+    if neighbors.is_empty() {
+        return None;
+    }
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for &(neighbor, weight) in neighbors {
+        let w = weight.max(1) as f64;
+        num += nodes[neighbor].x * w;
+        den += w;
+    }
+    if den > 0.0 {
+        Some(num / den)
+    } else {
+        None
+    }
+}
+
+fn recenter_rank(rank: usize, layers: &[Vec<usize>], nodes: &mut [LayerNode]) {
+    let layer = &layers[rank];
+    if layer.is_empty() {
+        return;
+    }
+    let mut left = f64::INFINITY;
+    let mut right = f64::NEG_INFINITY;
+    for &node in layer {
+        left = left.min(nodes[node].x - nodes[node].width / 2.0);
+        right = right.max(nodes[node].x + nodes[node].width / 2.0);
+    }
+    if !left.is_finite() || !right.is_finite() {
+        return;
+    }
+    let center = (left + right) / 2.0;
+    for &node in layer {
+        nodes[node].x -= center;
+    }
 }
 
 fn enforce_layer_spacing(
@@ -1568,28 +2134,69 @@ fn enforce_cluster_rank_blocks(
     }
 }
 
+fn collect_flat_order_constraints(
+    edges: &[DirectedEdge],
+    real_layer_node: &[usize],
+    layer_nodes: &[LayerNode],
+) -> HashSet<(usize, usize)> {
+    let mut constraints = HashSet::new();
+    for edge in edges {
+        if !edge.flat {
+            continue;
+        }
+        let a = real_layer_node[edge.tail];
+        let b = real_layer_node[edge.head];
+        if a == b || layer_nodes[a].rank != layer_nodes[b].rank {
+            continue;
+        }
+        if layer_nodes[a].order <= layer_nodes[b].order {
+            constraints.insert((a, b));
+        } else {
+            constraints.insert((b, a));
+        }
+    }
+    constraints
+}
+
 fn collect_flat_constraints(
     edges: &[DirectedEdge],
     real_layer_node: &[usize],
     layer_nodes: &[LayerNode],
-) -> Vec<(usize, usize)> {
+    spacing: f64,
+) -> Vec<FlatConstraint> {
     let mut constraints = Vec::new();
     for edge in edges {
         if !edge.flat {
             continue;
         }
-        let left = real_layer_node[edge.tail];
-        let right = real_layer_node[edge.head];
-        if layer_nodes[left].rank != layer_nodes[right].rank {
+        let a = real_layer_node[edge.tail];
+        let b = real_layer_node[edge.head];
+        if a == b || layer_nodes[a].rank != layer_nodes[b].rank {
             continue;
         }
-        constraints.push((left, right));
+        let (left, right) = if layer_nodes[a].order <= layer_nodes[b].order {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let base_gap =
+            layer_nodes[left].width / 2.0 + layer_nodes[right].width / 2.0 + spacing.max(0.0);
+        let label_gap = edge
+            .label
+            .as_ref()
+            .map(|label| estimate_label_width(label) * 0.7)
+            .unwrap_or(0.0);
+        constraints.push(FlatConstraint {
+            left,
+            right,
+            min_gap: base_gap.max(label_gap),
+        });
     }
     constraints
 }
 
 fn apply_flat_constraints(
-    flat_constraints: &[(usize, usize)],
+    flat_constraints: &[FlatConstraint],
     rank: usize,
     layers: &[Vec<usize>],
     nodes: &mut [LayerNode],
@@ -1597,14 +2204,25 @@ fn apply_flat_constraints(
     if flat_constraints.is_empty() || layers[rank].is_empty() {
         return;
     }
-    for &(left, right) in flat_constraints {
+    for constraint in flat_constraints {
+        let left = constraint.left;
+        let right = constraint.right;
         if nodes[left].rank != rank || nodes[right].rank != rank {
             continue;
         }
-        let target = (nodes[left].x + nodes[right].x) / 2.0;
-        nodes[left].x = (nodes[left].x + target) / 2.0;
-        nodes[right].x = (nodes[right].x + target) / 2.0;
+        let current_gap = nodes[right].x - nodes[left].x;
+        if current_gap >= constraint.min_gap {
+            continue;
+        }
+        let push = (constraint.min_gap - current_gap) / 2.0;
+        nodes[left].x -= push;
+        nodes[right].x += push;
     }
+}
+
+fn estimate_label_width(label: &str) -> f64 {
+    let count = label.chars().count() as f64;
+    (count * 7.0 + 8.0).max(0.0)
 }
 
 fn flat_edge_points(chain: &[usize], nodes: &[LayerNode], routing_padding: f64) -> Vec<(f64, f64)> {
@@ -1632,6 +2250,19 @@ fn flat_edge_points(chain: &[usize], nodes: &[LayerNode], routing_padding: f64) 
         (b.x, b.y + lift),
         (b.x, b.y),
     ]
+}
+
+fn flat_edge_label_position(points: &[(f64, f64)], routing_padding: f64) -> Option<(f64, f64)> {
+    if points.is_empty() {
+        return None;
+    }
+    let (sum_x, max_y) = points.iter().fold((0.0, f64::NEG_INFINITY), |(sx, my), p| {
+        (sx + p.0, my.max(p.1))
+    });
+    Some((
+        sum_x / points.len() as f64,
+        max_y + routing_padding.max(2.0) * 1.5,
+    ))
 }
 
 fn offset_polyline(points: &mut [(f64, f64)], amount: f64) {

@@ -9,7 +9,8 @@ const COMPONENT_GAP: f64 = 80.0;
 const MINIMUM_LENGTH_DEFAULT: u32 = 1;
 const VERTEX_SPACING_DEFAULT: f64 = 10.0;
 const DUMMY_VERTICES_DEFAULT: bool = true;
-const RANKING_TYPE_DEFAULT: RankingType = RankingType::MinimizeEdgeLength;
+const RANKING_TYPE_DEFAULT: RankingType = RankingType::Hybrid;
+const HYBRID_WEIGHT_DEFAULT: f64 = 0.5;
 const C_MINIMIZATION_DEFAULT: CrossingMinimization = CrossingMinimization::Median;
 const TRANSPOSE_DEFAULT: bool = true;
 const DUMMY_SIZE_DEFAULT: f64 = 1.0;
@@ -18,6 +19,7 @@ const ENV_MINIMUM_LENGTH: &str = "RUST_GRAPH_MIN_LEN";
 const ENV_VERTEX_SPACING: &str = "RUST_GRAPH_V_SPACING";
 const ENV_DUMMY_VERTICES: &str = "RUST_GRAPH_DUMMIES";
 const ENV_RANKING_TYPE: &str = "RUST_GRAPH_R_TYPE";
+const ENV_RANKING_HYBRID_WEIGHT: &str = "RUST_GRAPH_R_HYBRID_WEIGHT";
 const ENV_CROSSING_MINIMIZATION: &str = "RUST_GRAPH_CROSS_MIN";
 const ENV_TRANSPOSE: &str = "RUST_GRAPH_TRANSPOSE";
 const ENV_DUMMY_SIZE: &str = "RUST_GRAPH_DUMMY_SIZE";
@@ -50,6 +52,10 @@ pub struct Config {
     pub dummy_size: f64,
     /// Defines how vertices are placed vertically.
     pub ranking_type: RankingType,
+    /// Blend factor for [`RankingType::Hybrid`] where `0.0` is equivalent to
+    /// [`RankingType::MinimizeEdgeLength`] and `1.0` is equivalent to
+    /// [`RankingType::Original`].
+    pub hybrid_weight: f64,
     /// Which heuristic to use when minimizing edge crossings.
     pub c_minimization: CrossingMinimization,
     /// Whether to attempt to further reduce crossings by swapping vertices in a
@@ -66,6 +72,17 @@ impl Config {
             "y" => Ok(true),
             "n" => Ok(false),
             v => Err(format!("Invalid argument for dummy vertex env: {v}")),
+        };
+        let parse_hybrid_weight = |x: String| {
+            let value = x.parse::<f64>().map_err(|e| {
+                format!("Invalid argument for hybrid ranking weight env '{x}': {e}")
+            })?;
+            if !(0.0..=1.0).contains(&value) {
+                return Err(format!(
+                    "Invalid argument for hybrid ranking weight env '{x}': expected value in [0.0, 1.0]"
+                ));
+            }
+            Ok(value)
         };
 
         read_env!(
@@ -84,6 +101,11 @@ impl Config {
             (|x| x.parse::<f64>()),
             ENV_VERTEX_SPACING
         );
+        read_env!(
+            config.hybrid_weight,
+            parse_hybrid_weight,
+            ENV_RANKING_HYBRID_WEIGHT
+        );
         read_env!(config.dummy_vertices, parse_bool, ENV_DUMMY_VERTICES);
         read_env!(config.dummy_size, (|x| x.parse::<f64>()), ENV_DUMMY_SIZE);
         read_env!(config.transpose, parse_bool, ENV_TRANSPOSE);
@@ -100,6 +122,7 @@ impl Default for Config {
             dummy_vertices: DUMMY_VERTICES_DEFAULT,
             dummy_size: DUMMY_SIZE_DEFAULT,
             ranking_type: RANKING_TYPE_DEFAULT,
+            hybrid_weight: HYBRID_WEIGHT_DEFAULT,
             c_minimization: C_MINIMIZATION_DEFAULT,
             transpose: TRANSPOSE_DEFAULT,
         }
@@ -111,6 +134,7 @@ impl Default for Config {
 pub enum RankingType {
     Original,
     MinimizeEdgeLength,
+    Hybrid,
     Up,
     Down,
 }
@@ -122,6 +146,7 @@ impl TryFrom<String> for RankingType {
         match value.as_str() {
             "original" => Ok(Self::Original),
             "minimize" => Ok(Self::MinimizeEdgeLength),
+            "hybrid" => Ok(Self::Hybrid),
             "up" => Ok(Self::Up),
             "down" => Ok(Self::Down),
             s => Err(format!("invalid value for ranking type: {s}")),
@@ -136,6 +161,7 @@ impl From<RankingType> for &'static str {
             RankingType::Down => "down",
             RankingType::Original => "original",
             RankingType::MinimizeEdgeLength => "minimize",
+            RankingType::Hybrid => "hybrid",
         }
     }
 }
@@ -719,7 +745,12 @@ fn layout_component(
         .collect();
 
     info!(target: "layout", "Starting phase 1 [dot_rank]");
-    let mut ranks = assign_ranks(local_count, &oriented_edges, config.ranking_type);
+    let mut ranks = assign_ranks(
+        local_count,
+        &oriented_edges,
+        config.ranking_type,
+        config.hybrid_weight,
+    );
     normalize_ranks(&mut ranks);
     // dot/flat.c reserves an extra rank above rank 0 when non-adjacent flat
     // labels need virtual label nodes.
@@ -1084,9 +1115,25 @@ fn dfs_break_cycles(
     onstack[node] = false;
 }
 
-fn assign_ranks(node_count: usize, edges: &[DirectedEdge], ranking_type: RankingType) -> Vec<i32> {
+fn assign_ranks(
+    node_count: usize,
+    edges: &[DirectedEdge],
+    ranking_type: RankingType,
+    hybrid_weight: f64,
+) -> Vec<i32> {
     if node_count == 0 {
         return Vec::new();
+    }
+
+    if matches!(ranking_type, RankingType::Hybrid) {
+        let minimize = assign_ranks(
+            node_count,
+            edges,
+            RankingType::MinimizeEdgeLength,
+            hybrid_weight,
+        );
+        let original = assign_ranks(node_count, edges, RankingType::Original, hybrid_weight);
+        return blend_hybrid_ranks(node_count, edges, &minimize, &original, hybrid_weight);
     }
 
     let topo = topo_order(node_count, edges);
@@ -1173,6 +1220,37 @@ fn assign_ranks(node_count: usize, edges: &[DirectedEdge], ranking_type: Ranking
         }
     }
 
+    relax_forward(&mut rank, &topo, &outgoing, edges);
+    rank
+}
+
+fn blend_hybrid_ranks(
+    node_count: usize,
+    edges: &[DirectedEdge],
+    minimize: &[i32],
+    original: &[i32],
+    hybrid_weight: f64,
+) -> Vec<i32> {
+    let weight = hybrid_weight.clamp(0.0, 1.0);
+    if weight <= f64::EPSILON {
+        return minimize.to_vec();
+    }
+    if (1.0 - weight) <= f64::EPSILON {
+        return original.to_vec();
+    }
+
+    let mut rank = vec![0i32; node_count];
+    for node in 0..node_count {
+        let compact = minimize.get(node).copied().unwrap_or_default() as f64;
+        let tall = original.get(node).copied().unwrap_or_default() as f64;
+        rank[node] = ((1.0 - weight) * compact + weight * tall).round() as i32;
+    }
+
+    let topo = topo_order(node_count, edges);
+    let mut outgoing = vec![Vec::<usize>::new(); node_count];
+    for (edge_idx, edge) in edges.iter().enumerate() {
+        outgoing[edge.tail].push(edge_idx);
+    }
     relax_forward(&mut rank, &topo, &outgoing, edges);
     rank
 }

@@ -8,15 +8,15 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use iced::advanced::widget;
-use iced::advanced::widget::{tree, Operation, Tree, Widget};
+use iced::advanced::widget::{Operation, Tree, Widget, tree};
 use iced::time::Instant;
 use iced::widget::canvas::{self, Path};
 use iced::widget::{Component, Lazy, Stack};
 use iced::window::RedrawRequest;
-use iced::{event, Color, Element, Length, Padding, Point, Size, Task, Transformation, Vector};
+use iced::{Color, Element, Length, Padding, Point, Size, Task, Transformation, Vector, event};
 
-use crate::layout_engine::{compute_layout, GraphLayout};
 pub use crate::layout_engine::{Cluster, EdgeEndpoint, EdgeEndpointKind};
+use crate::layout_engine::{GraphLayout, compute_layout};
 use crate::motion::easing::Easing;
 
 pub mod motion;
@@ -471,11 +471,11 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     pub fn edge_label_element(
         mut self,
         f: impl Fn(
-                usize,
-                (u32, u32),
-                Option<&str>,
-            ) -> Option<Element<'static, Message, Theme, Renderer>>
-            + 'a,
+            usize,
+            (u32, u32),
+            Option<&str>,
+        ) -> Option<Element<'static, Message, Theme, Renderer>>
+        + 'a,
     ) -> Self {
         self.edge_label_element = Box::new(f);
         self
@@ -484,12 +484,12 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     pub fn edge_endpoint(
         mut self,
         f: impl Fn(
-                usize,
-                (u32, u32),
-                EdgeEndpointKind,
-                EdgeEndpoint,
-            ) -> Option<Element<'static, Message, Theme, Renderer>>
-            + 'a,
+            usize,
+            (u32, u32),
+            EdgeEndpointKind,
+            EdgeEndpoint,
+        ) -> Option<Element<'static, Message, Theme, Renderer>>
+        + 'a,
     ) -> Self {
         self.edge_endpoint = Box::new(f);
         self
@@ -814,6 +814,36 @@ where
     }
 
     fn operate(&self, state: &mut Self::State, operation: &mut dyn widget::Operation) {
+        let mut invalidate_request = InvalidateRequest::default();
+        operation.custom(&mut invalidate_request, self.id.as_ref());
+
+        if invalidate_request.requested {
+            state.switch_state.flip();
+            let signature = crate::layout_engine::layout_signature(
+                &self.graph.nodes,
+                &self.graph.edges,
+                &self.clusters,
+            );
+            {
+                let mut memo = state.layout_memo.borrow_mut();
+                let _ = memo.layout_for(signature, || {
+                    compute_layout(
+                        &self.graph.nodes,
+                        &self.graph.edges,
+                        &self.graph.config,
+                        &self.node_size,
+                        &self.edge_label,
+                        &self.clusters,
+                        &self.render_config,
+                    )
+                });
+            }
+            state.previous_graph = Some(self.graph.clone().into_owned());
+            state.previous_signature = Some(signature);
+            state.animation = SharedAnimation::default();
+            state.refresh_nonce = state.refresh_nonce.saturating_add(1);
+        }
+
         operation.custom(&mut state.refresh_nonce, self.id.as_ref());
     }
 }
@@ -828,6 +858,11 @@ pub struct SugiyamaState {
     viewport: SharedViewport,
     layout_memo: Rc<RefCell<LayoutMemo>>,
     refresh_nonce: u64,
+}
+
+#[derive(Default)]
+struct InvalidateRequest {
+    requested: bool,
 }
 
 struct GraphCanvas<Renderer>
@@ -1323,6 +1358,44 @@ where
     }
 
     iced::advanced::widget::operate::<()>(ForceReview {
+        target: id.into().0,
+    })
+    .discard()
+}
+
+/// Produces a [`Task`] that snapshots the currently displayed graph state,
+/// primes animation, and rebuilds the animated [`Sugiyama`] view for the
+/// widget with the given [`Id`].
+pub fn invalidate<Message>(id: impl Into<Id>) -> Task<Message>
+where
+    Message: Send + 'static,
+{
+    struct Invalidate {
+        target: widget::Id,
+    }
+
+    impl<T> widget::Operation<T> for Invalidate {
+        fn container(
+            &mut self,
+            _id: Option<&widget::Id>,
+            _bounds: iced::Rectangle,
+            operate_on_children: &mut dyn FnMut(&mut dyn widget::Operation<T>),
+        ) {
+            operate_on_children(self);
+        }
+
+        fn custom(&mut self, state: &mut dyn std::any::Any, id: Option<&widget::Id>) {
+            if id != Some(&self.target) {
+                return;
+            }
+
+            if let Some(request) = state.downcast_mut::<InvalidateRequest>() {
+                request.requested = true;
+            }
+        }
+    }
+
+    iced::advanced::widget::operate::<()>(Invalidate {
         target: id.into().0,
     })
     .discard()

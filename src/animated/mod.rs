@@ -8,15 +8,15 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use iced::advanced::widget;
-use iced::advanced::widget::{Operation, Tree, Widget, tree};
+use iced::advanced::widget::{tree, Operation, Tree, Widget};
 use iced::time::Instant;
 use iced::widget::canvas::{self, Path};
 use iced::widget::{Component, Lazy, Stack};
 use iced::window::RedrawRequest;
-use iced::{Color, Element, Length, Padding, Point, Size, Task, Transformation, Vector, event};
+use iced::{event, Color, Element, Length, Padding, Point, Size, Task, Transformation, Vector};
 
+use crate::layout_engine::{compute_layout, GraphLayout};
 pub use crate::layout_engine::{Cluster, EdgeEndpoint, EdgeEndpointKind};
-use crate::layout_engine::{GraphLayout, compute_layout};
 use crate::motion::easing::Easing;
 
 pub mod motion;
@@ -471,11 +471,11 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     pub fn edge_label_element(
         mut self,
         f: impl Fn(
-            usize,
-            (u32, u32),
-            Option<&str>,
-        ) -> Option<Element<'static, Message, Theme, Renderer>>
-        + 'a,
+                usize,
+                (u32, u32),
+                Option<&str>,
+            ) -> Option<Element<'static, Message, Theme, Renderer>>
+            + 'a,
     ) -> Self {
         self.edge_label_element = Box::new(f);
         self
@@ -484,12 +484,12 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     pub fn edge_endpoint(
         mut self,
         f: impl Fn(
-            usize,
-            (u32, u32),
-            EdgeEndpointKind,
-            EdgeEndpoint,
-        ) -> Option<Element<'static, Message, Theme, Renderer>>
-        + 'a,
+                usize,
+                (u32, u32),
+                EdgeEndpointKind,
+                EdgeEndpoint,
+            ) -> Option<Element<'static, Message, Theme, Renderer>>
+            + 'a,
     ) -> Self {
         self.edge_endpoint = Box::new(f);
         self
@@ -3081,13 +3081,6 @@ fn segment_boundary_intersection(
     if dx.abs() <= f32::EPSILON && dy.abs() <= f32::EPSILON {
         return None;
     }
-
-    let half_width = node_size.width * 0.5;
-    let half_height = node_size.height * 0.5;
-    let min_x = node_center.x - half_width;
-    let max_x = node_center.x + half_width;
-    let min_y = node_center.y - half_height;
-    let max_y = node_center.y + half_height;
 
     let radius = (node_size.width.min(node_size.height) * 0.25).min(18.0);
     segment_boundary_intersection_t(inside, outside, node_center, node_size)

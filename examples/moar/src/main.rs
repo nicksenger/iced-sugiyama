@@ -359,8 +359,7 @@ impl Moarificator {
         match message {
             Message::AppStarted => {
                 let resize = window::latest().and_then(|id| {
-                    window::resize::<()>(id, iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-                        .discard()
+                    window::resize::<()>(id, iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT)).discard()
                 });
 
                 if self.headless {

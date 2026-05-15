@@ -1945,13 +1945,13 @@ where
             .as_overlay_mut()
             .overlay(layout, renderer)
             .map(|content| {
-            iced::advanced::overlay::Element::new(Box::new(ViewTransformedOverlay {
-                content,
-                graph_bounds: self.graph_bounds,
-                padding: self.padding,
-                viewport: self.viewport,
-            }))
-        })
+                iced::advanced::overlay::Element::new(Box::new(ViewTransformedOverlay {
+                    content,
+                    graph_bounds: self.graph_bounds,
+                    padding: self.padding,
+                    viewport: self.viewport,
+                }))
+            })
     }
 }
 

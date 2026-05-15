@@ -1750,6 +1750,7 @@ where
                     if let Some(position) = inner_cursor {
                         let captured = self.viewport.drag_to(position, Instant::now());
                         shell.invalidate_layout();
+                        shell.request_redraw();
                         if captured {
                             viewport_status = event::Status::Captured;
                         }

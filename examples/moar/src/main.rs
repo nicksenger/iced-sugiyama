@@ -7,7 +7,6 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::application::Title;
 use iced::mouse;
 use iced::widget::canvas::{self, Path};
 use iced::widget::{Column, Container, button, container, text};
@@ -34,6 +33,14 @@ const MERGED_PNG_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-comp.png";
 const GRAPHVIZ_PLAIN_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-gviz.txt";
 const CUSTOM_LAYOUT_PLAIN_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-out.txt";
 const LAYOUT_SCORES_OUTPUT_PATH: &str = "/tmp/iced-sugiyama-scores.txt";
+
+fn app_theme(_: &Moarificator) -> Theme {
+    Theme::Light
+}
+
+fn app_scale_factor(_: &Moarificator) -> f32 {
+    0.8
+}
 
 #[derive(Debug, Clone, Copy)]
 enum GraphvizEndpointGlyphKind {
@@ -137,36 +144,31 @@ pub fn main() -> iced::Result {
     }
 
     iced::application(
-        |state: &Moarificator| state.title(&()),
+        move || {
+            let task = Task::done(Message::AppStarted);
+
+            (
+                Moarificator::new(
+                    options.headless,
+                    options.noimg,
+                    options.seed,
+                    options.node_count,
+                    options.cluster_count,
+                ),
+                task,
+            )
+        },
         Moarificator::update,
         Moarificator::view,
     )
-    .theme(|_| iced::Theme::Light)
-    .scale_factor(|_| 0.8)
+    .title(Moarificator::title)
+    .theme(app_theme)
+    .scale_factor(app_scale_factor)
     .window(window::Settings {
         size: iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
         ..Default::default()
     })
-    .run_with(move || {
-        let task = Task::done(Message::AppStarted);
-
-        (
-            Moarificator::new(
-                options.headless,
-                options.noimg,
-                options.seed,
-                options.node_count,
-                options.cluster_count,
-            ),
-            task,
-        )
-    })
-}
-
-impl<S> Title<S> for Moarificator {
-    fn title(&self, _state: &S) -> String {
-        "iced-sugiyama".to_string()
-    }
+    .run()
 }
 
 struct Moarificator {
@@ -180,6 +182,10 @@ struct Moarificator {
     pending_iced_screenshot: Option<Screenshot>,
 }
 impl Moarificator {
+    fn title(&self) -> String {
+        "iced-sugiyama".to_string()
+    }
+
     fn new(headless: bool, noimg: bool, seed: u64, node_count: u32, cluster_count: usize) -> Self {
         Self {
             headless,
@@ -352,8 +358,8 @@ impl Moarificator {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AppStarted => {
-                let resize = window::get_latest().and_then(|id| {
-                    window::resize::<f32>(id, iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+                let resize = window::latest().and_then(|id| {
+                    window::resize::<()>(id, iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
                         .discard()
                 });
 
@@ -386,7 +392,7 @@ impl Moarificator {
                 return render;
             }
             Message::CaptureIcedView => {
-                return window::get_latest()
+                return window::latest()
                     .and_then(window::screenshot)
                     .map(Message::IcedViewCaptured);
             }
@@ -693,7 +699,7 @@ fn initial_graph(seed: u64, node_count: u32) -> Graph {
 }
 
 fn close_latest_window() -> Task<Message> {
-    window::get_latest().then(|id| match id {
+    window::latest().then(|id| match id {
         Some(id) => window::close(id),
         None => Task::none(),
     })
@@ -1569,7 +1575,7 @@ async fn save_merged_png(graphviz_png: Vec<u8>, screenshot: Screenshot) -> Resul
     let iced_image = image::RgbaImage::from_raw(
         screenshot.size.width,
         screenshot.size.height,
-        screenshot.bytes.to_vec(),
+        screenshot.rgba.to_vec(),
     )
     .ok_or(MergePngError::InvalidIcedScreenshotBuffer)
     .map_err(|error| error.to_string())?;
@@ -1884,6 +1890,7 @@ fn transparent_button_style(_theme: &Theme, _status: button::Status) -> button::
             .width(2.0)
             .color(Color::BLACK),
         shadow: Default::default(),
+        snap: false,
     }
 }
 

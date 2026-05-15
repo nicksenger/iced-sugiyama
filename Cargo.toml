@@ -30,6 +30,6 @@ keywords = ["science", "gui", "ui", "graphics", "interface", "widgets", "dinosau
 rust-version = "1.88"
 
 [workspace.dependencies]
-iced = { version = "0.13", features = ["advanced", "canvas", "lazy"] }
+iced = { version = "0.14", features = ["advanced", "canvas", "lazy"] }
 rust_sugiyama = { package = "iced-sugiyama-core", path = "./core" }
 lyon_algorithms = "1"

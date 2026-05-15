@@ -813,9 +813,14 @@ where
         }
     }
 
-    fn operate(&self, state: &mut Self::State, operation: &mut dyn widget::Operation) {
+    fn operate(
+        &self,
+        bounds: iced::Rectangle,
+        state: &mut Self::State,
+        operation: &mut dyn widget::Operation,
+    ) {
         let mut invalidate_request = InvalidateRequest::default();
-        operation.custom(&mut invalidate_request, self.id.as_ref());
+        operation.custom(self.id.as_ref(), bounds, &mut invalidate_request);
 
         if invalidate_request.requested {
             state.switch_state.flip();
@@ -844,7 +849,7 @@ where
             state.refresh_nonce = state.refresh_nonce.saturating_add(1);
         }
 
-        operation.custom(&mut state.refresh_nonce, self.id.as_ref());
+        operation.custom(self.id.as_ref(), bounds, &mut state.refresh_nonce);
     }
 }
 
@@ -1309,7 +1314,7 @@ pub struct Id(widget::Id);
 impl Id {
     /// Creates a custom [`Id`].
     pub fn new(id: impl Into<std::borrow::Cow<'static, str>>) -> Self {
-        Self(widget::Id::new(id))
+        Self(id.into().into_owned().into())
     }
 
     /// Creates a unique [`Id`].
@@ -1337,16 +1342,12 @@ where
     }
 
     impl<T> widget::Operation<T> for ForceReview {
-        fn container(
+        fn custom(
             &mut self,
-            _id: Option<&widget::Id>,
+            id: Option<&widget::Id>,
             _bounds: iced::Rectangle,
-            operate_on_children: &mut dyn FnMut(&mut dyn widget::Operation<T>),
+            state: &mut dyn std::any::Any,
         ) {
-            operate_on_children(self);
-        }
-
-        fn custom(&mut self, state: &mut dyn std::any::Any, id: Option<&widget::Id>) {
             if id != Some(&self.target) {
                 return;
             }
@@ -1354,6 +1355,10 @@ where
             if let Some(refresh_nonce) = state.downcast_mut::<u64>() {
                 *refresh_nonce = refresh_nonce.saturating_add(1);
             }
+        }
+
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn widget::Operation<T>)) {
+            operate(self);
         }
     }
 
@@ -1375,16 +1380,12 @@ where
     }
 
     impl<T> widget::Operation<T> for Invalidate {
-        fn container(
+        fn custom(
             &mut self,
-            _id: Option<&widget::Id>,
+            id: Option<&widget::Id>,
             _bounds: iced::Rectangle,
-            operate_on_children: &mut dyn FnMut(&mut dyn widget::Operation<T>),
+            state: &mut dyn std::any::Any,
         ) {
-            operate_on_children(self);
-        }
-
-        fn custom(&mut self, state: &mut dyn std::any::Any, id: Option<&widget::Id>) {
             if id != Some(&self.target) {
                 return;
             }
@@ -1392,6 +1393,10 @@ where
             if let Some(request) = state.downcast_mut::<InvalidateRequest>() {
                 request.requested = true;
             }
+        }
+
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn widget::Operation<T>)) {
+            operate(self);
         }
     }
 
@@ -1465,7 +1470,7 @@ where
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &iced::advanced::layout::Limits,
@@ -1490,7 +1495,7 @@ where
         let cluster_container_count = cluster_container_layouts.len();
         let layouts = self
             .children
-            .iter()
+            .iter_mut()
             .zip(&mut tree.children)
             .enumerate()
             .map(|(index, (child, tree))| {
@@ -1500,9 +1505,9 @@ where
                         cluster_layout.size,
                         cluster_layout.size,
                     );
-                    child.as_widget().layout(tree, renderer, &child_limits)
+                    child.as_widget_mut().layout(tree, renderer, &child_limits)
                 } else {
-                    child.as_widget().layout(tree, renderer, &limits)
+                    child.as_widget_mut().layout(tree, renderer, &limits)
                 }
             })
             .collect::<Vec<_>>();
@@ -1661,43 +1666,44 @@ where
     }
 
     fn operate(
-        &self,
+        &mut self,
         tree: &mut Tree,
         layout: iced::advanced::Layout<'_>,
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.container(None, layout.bounds(), &mut |operation| {
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
             self.children
-                .iter()
+                .iter_mut()
                 .zip(&mut tree.children)
                 .zip(layout.children())
                 .for_each(|((child, state), layout)| {
                     child
-                        .as_widget()
+                        .as_widget_mut()
                         .operate(state, layout, renderer, operation);
                 })
         });
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         tree: &mut Tree,
-        event: iced::Event,
+        event: &iced::Event,
         layout: iced::advanced::Layout<'_>,
         cursor: iced::advanced::mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn iced::advanced::Clipboard,
         shell: &mut iced::advanced::Shell<'_, Message>,
         viewport: &iced::Rectangle,
-    ) -> iced::event::Status {
+    ) {
         let animation = tree.state.downcast_mut::<SharedAnimation>();
         if let Animation::Pending = animation.get() {
             animation.set(Animation::Active {
                 start: Instant::now(),
                 elapsed: Duration::ZERO,
             });
-            shell.request_redraw(RedrawRequest::NextFrame);
+            shell.request_redraw();
         }
 
         let bounds = layout.bounds();
@@ -1728,7 +1734,7 @@ where
                     };
                     if self.viewport.zoom_at(delta_y, position, inner_size) {
                         shell.invalidate_layout();
-                        shell.request_redraw(RedrawRequest::NextFrame);
+                        shell.request_redraw();
                         viewport_status = event::Status::Captured;
                         swallow_children = true;
                     }
@@ -1754,7 +1760,7 @@ where
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
                 let captured = self.viewport.end_drag(Instant::now());
                 if self.viewport.is_moving() {
-                    shell.request_redraw(RedrawRequest::NextFrame);
+                    shell.request_redraw();
                 }
                 if captured {
                     viewport_status = event::Status::Captured;
@@ -1766,17 +1772,17 @@ where
 
         if let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event {
             let (new_animation, redraw) =
-                animation.get().timed_transition(self.motion_duration, now);
-            let viewport_needs_layout = self.viewport.tick(now);
+                animation.get().timed_transition(self.motion_duration, *now);
+            let viewport_needs_layout = self.viewport.tick(*now);
             if let Some(redraw) = redraw {
                 shell.invalidate_layout();
-                shell.request_redraw(redraw);
+                shell.request_redraw_at(redraw);
             }
             if viewport_needs_layout {
                 shell.invalidate_layout();
             }
             if self.viewport.is_moving() {
-                shell.request_redraw(RedrawRequest::At(now + FRAME_DURATION));
+                shell.request_redraw_at(*now + FRAME_DURATION);
             }
             animation.set(new_animation);
         }
@@ -1793,29 +1799,32 @@ where
                 .iter_mut()
                 .zip(&mut tree.children)
                 .zip(layout.children())
-                .map(|((child, state), layout)| {
-                    child.as_widget_mut().on_event(
+                .for_each(|((child, state), layout)| {
+                    child.as_widget_mut().update(
                         state,
-                        event.clone(),
+                        event,
                         layout,
                         transformed_cursor,
                         renderer,
                         clipboard,
                         shell,
                         &transformed_viewport,
-                    )
-                })
-                .fold(event::Status::Ignored, event::Status::merge)
+                    );
+                });
+            shell.event_status()
         };
 
-        event::Status::merge(viewport_status, child_status)
+        if event::Status::merge(viewport_status, child_status) == event::Status::Captured {
+            shell.capture_event();
+        }
     }
 
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: iced::advanced::Layout<'_>,
+        layout: iced::advanced::Layout<'b>,
         renderer: &Renderer,
+        viewport: &iced::Rectangle,
         translation: Vector,
     ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, Renderer>> {
         let graph_bounds = iced::Rectangle {
@@ -1830,6 +1839,7 @@ where
             tree,
             layout,
             renderer,
+            viewport,
             translation,
         )
         .map(|content| {
@@ -1859,7 +1869,7 @@ where
     Renderer: iced::advanced::Renderer,
 {
     fn layout(&mut self, renderer: &Renderer, bounds: Size) -> iced::advanced::layout::Node {
-        self.content.layout(renderer, bounds)
+        self.content.as_overlay_mut().layout(renderer, bounds)
     }
 
     fn draw(
@@ -1875,6 +1885,7 @@ where
             transform_cursor(cursor, self.graph_bounds, self.padding, self.viewport);
         renderer.with_transformation(transform, |renderer| {
             self.content
+                .as_overlay()
                 .draw(renderer, theme, style, layout, transformed_cursor);
         });
     }
@@ -1885,66 +1896,54 @@ where
         renderer: &Renderer,
         operation: &mut dyn iced::advanced::widget::Operation,
     ) {
-        self.content.operate(layout, renderer, operation);
+        self.content
+            .as_overlay_mut()
+            .operate(layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
-        event: iced::Event,
+        event: &iced::Event,
         layout: iced::advanced::Layout<'_>,
         cursor: iced::mouse::Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn iced::advanced::Clipboard,
         shell: &mut iced::advanced::Shell<'_, Message>,
-    ) -> event::Status {
+    ) {
         let transformed_cursor =
             transform_cursor(cursor, self.graph_bounds, self.padding, self.viewport);
-        self.content.on_event(
+        self.content.as_overlay_mut().update(
             event,
             layout,
             transformed_cursor,
             renderer,
             clipboard,
             shell,
-        )
+        );
     }
 
     fn mouse_interaction(
         &self,
         layout: iced::advanced::Layout<'_>,
         cursor: iced::mouse::Cursor,
-        viewport: &iced::Rectangle,
         renderer: &Renderer,
     ) -> iced::mouse::Interaction {
         let transformed_cursor =
             transform_cursor(cursor, self.graph_bounds, self.padding, self.viewport);
-        let transformed_viewport =
-            transform_viewport(*viewport, self.graph_bounds, self.padding, self.viewport);
         self.content
-            .mouse_interaction(layout, transformed_cursor, &transformed_viewport, renderer)
-    }
-
-    fn is_over(
-        &self,
-        layout: iced::advanced::Layout<'_>,
-        renderer: &Renderer,
-        cursor_position: Point,
-    ) -> bool {
-        let transformed_position = inverse_view_transform_point(
-            cursor_position,
-            self.graph_bounds,
-            self.padding,
-            self.viewport,
-        );
-        self.content.is_over(layout, renderer, transformed_position)
+            .as_overlay()
+            .mouse_interaction(layout, transformed_cursor, renderer)
     }
 
     fn overlay<'b>(
         &'b mut self,
-        layout: iced::advanced::Layout<'_>,
+        layout: iced::advanced::Layout<'b>,
         renderer: &Renderer,
     ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, Renderer>> {
-        self.content.overlay(layout, renderer).map(|content| {
+        self.content
+            .as_overlay_mut()
+            .overlay(layout, renderer)
+            .map(|content| {
             iced::advanced::overlay::Element::new(Box::new(ViewTransformedOverlay {
                 content,
                 graph_bounds: self.graph_bounds,
@@ -2094,8 +2093,8 @@ fn draw_edge_with_label<Renderer>(
             position,
             color: label_color.scale_alpha(alpha),
             size: iced::Pixels(label_text_size.max(1.0)),
-            horizontal_alignment: iced::alignment::Horizontal::Center,
-            vertical_alignment: iced::alignment::Vertical::Center,
+            align_x: iced::alignment::Horizontal::Center.into(),
+            align_y: iced::alignment::Vertical::Center.into(),
             ..canvas::Text::default()
         });
     }

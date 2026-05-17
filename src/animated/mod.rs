@@ -3835,12 +3835,9 @@ fn edge_transition_snapshot(
             state: EdgeTransitionState::Active,
             progress: animation.progress(easing, duration).unwrap_or(1.0),
         },
-        // Once a motion cycle completes, expose the same baseline context
-        // as idle/pending so edge callbacks naturally return to their
-        // default (e.g. gray) palette between iterations.
         Animation::Complete => EdgeTransitionSnapshot {
-            state: EdgeTransitionState::Pending,
-            progress: 0.0,
+            state: EdgeTransitionState::Complete,
+            progress: 1.0,
         },
     }
 }

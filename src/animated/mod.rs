@@ -1080,6 +1080,7 @@ where
                                 &projected_curve,
                                 style_for_old(edge.index()),
                                 1.0,
+                                1.0,
                                 label_position,
                             );
                         }
@@ -1126,6 +1127,7 @@ where
                                 &projected,
                                 &projected_curve,
                                 style_for_current(edge.index()),
+                                1.0,
                                 1.0,
                                 label_position,
                             );
@@ -1256,6 +1258,7 @@ where
                                     &[],
                                     interpolated_style,
                                     1.0 - settle,
+                                    progress,
                                     interpolated_label_position,
                                 );
                                 if settle > 0.0 {
@@ -1275,6 +1278,7 @@ where
                                         &projected_new_curve,
                                         new_style,
                                         settle,
+                                        1.0,
                                         final_label_position,
                                     );
                                 }
@@ -1310,6 +1314,7 @@ where
                                     &projected,
                                     &projected_curve,
                                     style_for_current(edge.index()),
+                                    progress,
                                     progress,
                                     label_position,
                                 );
@@ -1349,6 +1354,7 @@ where
                                 &projected_curve,
                                 style_for_old(edge.index()),
                                 1.0 - progress,
+                                1.0,
                                 label_position,
                             );
                         }
@@ -1396,6 +1402,7 @@ where
                         &projected,
                         &projected_curve,
                         style_for_current(edge.index()),
+                        1.0,
                         1.0,
                         label_position,
                     );
@@ -2116,6 +2123,7 @@ fn draw_styled_edge<Renderer>(
     projected_curve_points: &[Point],
     style: OutgoingEdgeStyle,
     base_alpha: f32,
+    gradient_reveal: f32,
     label_position: Option<Point>,
 ) where
     Renderer: iced::advanced::graphics::geometry::Renderer,
@@ -2154,6 +2162,7 @@ fn draw_styled_edge<Renderer>(
         label_color(edge.index()),
         alpha,
         label_size,
+        gradient_reveal,
         label_position,
     );
 }
@@ -2171,6 +2180,7 @@ fn draw_edge_with_label<Renderer>(
     label_color: Color,
     alpha: f32,
     label_text_size: f32,
+    gradient_reveal: f32,
     label_position: Option<Point>,
 ) where
     Renderer: iced::advanced::graphics::geometry::Renderer,
@@ -2181,15 +2191,16 @@ fn draw_edge_with_label<Renderer>(
     let adjusted = extend_polyline_endpoints(points, endpoint_extension);
     let start = adjusted[0];
     let end = adjusted[adjusted.len() - 1];
+    let source_color = to_color.scale_alpha(alpha);
+    let destination_color = from_color.scale_alpha(alpha);
+    let gradient =
+        animated_edge_gradient(start, end, source_color, destination_color, gradient_reveal);
+
     frame.stroke(
         &edge_path(&adjusted, curve_points, corner_radius, endpoint_extension),
         canvas::Stroke {
             width: stroke_width,
-            style: canvas::stroke::Style::Gradient(canvas::Gradient::Linear(
-                canvas::gradient::Linear::new(start, end)
-                    .add_stop(0.0, to_color.scale_alpha(alpha))
-                    .add_stop(1.0, from_color.scale_alpha(alpha)),
-            )),
+            style: canvas::stroke::Style::Gradient(canvas::Gradient::Linear(gradient)),
             line_cap: canvas::LineCap::Round,
             ..canvas::Stroke::default()
         },
@@ -2206,6 +2217,46 @@ fn draw_edge_with_label<Renderer>(
             ..canvas::Text::default()
         });
     }
+}
+
+fn animated_edge_gradient(
+    start: Point,
+    end: Point,
+    source_color: Color,
+    destination_color: Color,
+    reveal: f32,
+) -> canvas::gradient::Linear {
+    let clamped = reveal.clamp(0.0, 1.0);
+    if clamped <= f32::EPSILON {
+        return canvas::gradient::Linear::new(start, end)
+            .add_stop(0.0, source_color)
+            .add_stop(1.0, source_color);
+    }
+    if clamped >= 1.0 - f32::EPSILON {
+        return canvas::gradient::Linear::new(start, end)
+            .add_stop(0.0, source_color)
+            .add_stop(1.0, destination_color);
+    }
+
+    let front_span = 0.08f32;
+    let front_start = (clamped - front_span).max(0.0);
+    let front_end = (clamped + 0.02).min(1.0);
+    let front_ratio = if clamped > f32::EPSILON {
+        (front_start / clamped).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let front_color = interpolate_color(source_color, destination_color, front_ratio);
+
+    let mut gradient = canvas::gradient::Linear::new(start, end).add_stop(0.0, source_color);
+    if front_start > f32::EPSILON {
+        gradient = gradient.add_stop(front_start, front_color);
+    }
+
+    gradient
+        .add_stop(clamped, destination_color)
+        .add_stop(front_end, source_color)
+        .add_stop(1.0, source_color)
 }
 
 fn rounded_polyline_path(points: &[Point], radius: f32) -> Path {

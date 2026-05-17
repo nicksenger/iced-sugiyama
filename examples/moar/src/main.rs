@@ -514,7 +514,7 @@ impl Moarificator {
                 .height(node_size_f32(n))
                 .into()
             })
-            .edge_color(edge_colors)
+            .edge_color(|ctx| edge_colors(ctx.edge_index))
             .edge_label(edge_label)
             .label_color(|idx| edge_colors(idx).0)
             .edge_endpoint(|idx, _, kind, endpoint| {

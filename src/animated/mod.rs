@@ -2,8 +2,9 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -302,6 +303,28 @@ pub enum Event<Message> {
     Noop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeTransitionState {
+    Snapshot,
+    Pending,
+    Active,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeRenderContext {
+    pub edge_index: usize,
+    pub edge: (u32, u32),
+    pub transition_progress: f32,
+    pub transition_state: EdgeTransitionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EdgeTransitionSnapshot {
+    state: EdgeTransitionState,
+    progress: f32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct OutgoingEdgeStyle {
     pub visible: bool,
@@ -374,8 +397,8 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
     stroke_width: f32,
     edge_corner_radius: f32,
     edge_endpoint_extension: f32,
-    edge_color: fn(usize) -> (Color, Color),
-    outgoing_edge_style: Box<dyn Fn(u32) -> OutgoingEdgeStyle + 'a>,
+    edge_color: Box<dyn Fn(EdgeRenderContext) -> (Color, Color) + 'a>,
+    outgoing_edge_style: Box<dyn Fn(EdgeRenderContext) -> OutgoingEdgeStyle + 'a>,
     edge_label: Box<dyn Fn(usize, (u32, u32)) -> Option<String> + 'a>,
     edge_label_element: Box<
         dyn Fn(
@@ -417,7 +440,7 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
             stroke_width: 2.0,
             edge_corner_radius: 10.0,
             edge_endpoint_extension: 0.0,
-            edge_color: |_| (Color::BLACK, Color::BLACK.scale_alpha(0.5)),
+            edge_color: Box::new(|_| (Color::BLACK, Color::BLACK.scale_alpha(0.5))),
             outgoing_edge_style: Box::new(|_| OutgoingEdgeStyle::default()),
             edge_label: Box::new(|_, _| None),
             edge_label_element: Box::new(|_, _, _| None),
@@ -438,12 +461,15 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
         self
     }
 
-    pub fn edge_color(mut self, f: fn(usize) -> (Color, Color)) -> Self {
-        self.edge_color = f;
+    pub fn edge_color(mut self, f: impl Fn(EdgeRenderContext) -> (Color, Color) + 'a) -> Self {
+        self.edge_color = Box::new(f);
         self
     }
 
-    pub fn outgoing_edge_style(mut self, f: impl Fn(u32) -> OutgoingEdgeStyle + 'a) -> Self {
+    pub fn outgoing_edge_style(
+        mut self,
+        f: impl Fn(EdgeRenderContext) -> OutgoingEdgeStyle + 'a,
+    ) -> Self {
         self.outgoing_edge_style = Box::new(f);
         self
     }
@@ -567,6 +593,10 @@ where
         let old_sugiyama = state
             .previous_signature
             .and_then(|signature| layout_memo.borrow().get_layout(signature));
+        let old_edge_style_by_index = state.previous_edge_style_by_index.clone();
+        let old_edge_color_by_index = state.previous_edge_color_by_index.clone();
+        let old_edge_style_hash = hash_outgoing_edge_style_map(old_edge_style_by_index.as_ref());
+        let old_edge_color_hash = hash_edge_color_map(old_edge_color_by_index.as_ref());
         Lazy::new(
             (
                 &self.graph,
@@ -575,8 +605,19 @@ where
                 state.animation.clone(),
                 state.viewport.clone(),
                 state.refresh_nonce,
+                old_edge_style_hash,
+                old_edge_color_hash,
             ),
-            move |(graph, old, switch_state, animation, viewport, _refresh_nonce)| {
+            move |(
+                graph,
+                old,
+                switch_state,
+                animation,
+                viewport,
+                _refresh_nonce,
+                _old_edge_style_hash,
+                _old_edge_color_hash,
+            )| {
                 let mut children = self
                     .graph
                     .nodes
@@ -600,6 +641,11 @@ where
                 });
 
                 let old_sugiyama = old_sugiyama.clone();
+                let edge_transition = edge_transition_snapshot(
+                    animation.get(),
+                    self.motion_easing,
+                    self.motion_duration,
+                );
                 let signature = crate::layout_engine::layout_signature(
                     &graph.nodes,
                     &graph.edges,
@@ -626,23 +672,27 @@ where
                     .map(|(index, edge)| {
                         (
                             index,
-                            normalize_outgoing_edge_style((self.outgoing_edge_style)(edge.0)),
+                            normalize_outgoing_edge_style((self.outgoing_edge_style)(
+                                edge_transition_context(index, *edge, edge_transition),
+                            )),
                         )
                     })
                     .collect::<HashMap<_, _>>();
-                let old_edge_style_by_index = old.as_ref().map(|old_graph| {
-                    old_graph
-                        .edges
-                        .iter()
-                        .enumerate()
-                        .map(|(index, edge)| {
-                            (
+                let edge_color_by_index = graph
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .map(|(index, edge)| {
+                        (
+                            index,
+                            (self.edge_color)(edge_transition_context(
                                 index,
-                                normalize_outgoing_edge_style((self.outgoing_edge_style)(edge.0)),
-                            )
-                        })
-                        .collect::<HashMap<_, _>>()
-                });
+                                *edge,
+                                edge_transition,
+                            )),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
                 let mut cluster_container_children = Vec::new();
                 for cluster in sugiyama.clusters() {
                     let Some(cluster_spec) = self.clusters.get(cluster.index()) else {
@@ -760,9 +810,10 @@ where
                             stroke_width: self.stroke_width,
                             edge_corner_radius: self.edge_corner_radius,
                             edge_endpoint_extension: self.edge_endpoint_extension,
-                            edge_color: self.edge_color,
+                            edge_color_by_index: edge_color_by_index.clone(),
                             edge_style_by_index: edge_style_by_index.clone(),
-                            old_edge_style_by_index,
+                            old_edge_style_by_index: old_edge_style_by_index.clone(),
+                            old_edge_color_by_index: old_edge_color_by_index.clone(),
                             cluster_color: self.cluster_color,
                             label_color: self.label_color,
                             edge_label_overlay_edges,
@@ -803,6 +854,14 @@ where
                 )
             });
         }
+        state.previous_edge_style_by_index = Some(snapshot_edge_styles(
+            &self.graph.edges,
+            self.outgoing_edge_style.as_ref(),
+        ));
+        state.previous_edge_color_by_index = Some(snapshot_edge_colors(
+            &self.graph.edges,
+            self.edge_color.as_ref(),
+        ));
         state.previous_graph = Some(self.graph.clone().into_owned());
         state.previous_signature = Some(signature);
         state.animation = SharedAnimation::default();
@@ -843,6 +902,14 @@ where
                     )
                 });
             }
+            state.previous_edge_style_by_index = Some(snapshot_edge_styles(
+                &self.graph.edges,
+                self.outgoing_edge_style.as_ref(),
+            ));
+            state.previous_edge_color_by_index = Some(snapshot_edge_colors(
+                &self.graph.edges,
+                self.edge_color.as_ref(),
+            ));
             state.previous_graph = Some(self.graph.clone().into_owned());
             state.previous_signature = Some(signature);
             state.animation = SharedAnimation::default();
@@ -859,6 +926,8 @@ pub struct SugiyamaState {
     switch_state: switch::State,
     previous_graph: Option<Graph>,
     previous_signature: Option<u64>,
+    previous_edge_style_by_index: Option<HashMap<usize, OutgoingEdgeStyle>>,
+    previous_edge_color_by_index: Option<HashMap<usize, (Color, Color)>>,
     animation: SharedAnimation,
     viewport: SharedViewport,
     layout_memo: Rc<RefCell<LayoutMemo>>,
@@ -881,9 +950,10 @@ where
     stroke_width: f32,
     edge_corner_radius: f32,
     edge_endpoint_extension: f32,
-    edge_color: fn(usize) -> (Color, Color),
+    edge_color_by_index: HashMap<usize, (Color, Color)>,
     edge_style_by_index: HashMap<usize, OutgoingEdgeStyle>,
     old_edge_style_by_index: Option<HashMap<usize, OutgoingEdgeStyle>>,
+    old_edge_color_by_index: Option<HashMap<usize, (Color, Color)>>,
     cluster_color: fn(usize) -> Color,
     label_color: fn(usize) -> Color,
     edge_label_overlay_edges: HashSet<usize>,
@@ -938,11 +1008,23 @@ where
                     .copied()
                     .unwrap_or_default()
             };
+            let color_for_current = |index: usize| {
+                self.edge_color_by_index
+                    .get(&index)
+                    .copied()
+                    .unwrap_or_else(default_edge_gradient)
+            };
             let style_for_old = |index: usize| {
                 self.old_edge_style_by_index
                     .as_ref()
                     .and_then(|styles| styles.get(&index).copied())
                     .unwrap_or_else(|| style_for_current(index))
+            };
+            let color_for_old = |index: usize| {
+                self.old_edge_color_by_index
+                    .as_ref()
+                    .and_then(|colors| colors.get(&index).copied())
+                    .unwrap_or_else(|| color_for_current(index))
             };
             if let Some(old_layout) = self.old_sugiyama.as_ref() {
                 let animation = self.animation.get();
@@ -988,7 +1070,10 @@ where
                                 scaled_corner_radius,
                                 scaled_endpoint_extension,
                                 scaled_edge_label_size,
-                                self.edge_color,
+                                resolved_edge_colors(
+                                    color_for_old(edge.index()),
+                                    style_for_old(edge.index()),
+                                ),
                                 self.label_color,
                                 edge,
                                 &projected,
@@ -1032,7 +1117,10 @@ where
                                 scaled_corner_radius,
                                 scaled_endpoint_extension,
                                 scaled_edge_label_size,
-                                self.edge_color,
+                                resolved_edge_colors(
+                                    color_for_current(edge.index()),
+                                    style_for_current(edge.index()),
+                                ),
                                 self.label_color,
                                 edge,
                                 &projected,
@@ -1143,19 +1231,30 @@ where
                                 let settle = ((progress - EDGE_FINAL_SETTLE_START)
                                     / (1.0 - EDGE_FINAL_SETTLE_START))
                                     .clamp(0.0, 1.0);
-                                let style = style_for_current(edge.index());
+                                let old_style = style_for_old(edge.index());
+                                let new_style = style_for_current(edge.index());
+                                let interpolated_style =
+                                    interpolate_outgoing_edge_style(old_style, new_style, progress);
+                                let interpolated_colors = interpolate_edge_gradient(
+                                    resolved_edge_colors(color_for_old(edge.index()), old_style),
+                                    resolved_edge_colors(
+                                        color_for_current(edge.index()),
+                                        new_style,
+                                    ),
+                                    progress,
+                                );
                                 draw_styled_edge(
                                     frame,
                                     scaled_stroke_width,
                                     scaled_corner_radius,
                                     scaled_endpoint_extension,
                                     scaled_edge_label_size,
-                                    self.edge_color,
+                                    interpolated_colors,
                                     self.label_color,
                                     edge,
                                     &points,
                                     &[],
-                                    style,
+                                    interpolated_style,
                                     1.0 - settle,
                                     interpolated_label_position,
                                 );
@@ -1166,12 +1265,15 @@ where
                                         scaled_corner_radius,
                                         scaled_endpoint_extension,
                                         scaled_edge_label_size,
-                                        self.edge_color,
+                                        resolved_edge_colors(
+                                            color_for_current(edge.index()),
+                                            new_style,
+                                        ),
                                         self.label_color,
                                         edge,
                                         &projected_new,
                                         &projected_new_curve,
-                                        style,
+                                        new_style,
                                         settle,
                                         final_label_position,
                                     );
@@ -1199,7 +1301,10 @@ where
                                     scaled_corner_radius,
                                     scaled_endpoint_extension,
                                     scaled_edge_label_size,
-                                    self.edge_color,
+                                    resolved_edge_colors(
+                                        color_for_current(edge.index()),
+                                        style_for_current(edge.index()),
+                                    ),
                                     self.label_color,
                                     edge,
                                     &projected,
@@ -1234,7 +1339,10 @@ where
                                 scaled_corner_radius,
                                 scaled_endpoint_extension,
                                 scaled_edge_label_size,
-                                self.edge_color,
+                                resolved_edge_colors(
+                                    color_for_old(edge.index()),
+                                    style_for_old(edge.index()),
+                                ),
                                 self.label_color,
                                 edge,
                                 &projected,
@@ -1279,7 +1387,10 @@ where
                         scaled_corner_radius,
                         scaled_endpoint_extension,
                         scaled_edge_label_size,
-                        self.edge_color,
+                        resolved_edge_colors(
+                            color_for_current(edge.index()),
+                            style_for_current(edge.index()),
+                        ),
                         self.label_color,
                         edge,
                         &projected,
@@ -1998,7 +2109,7 @@ fn draw_styled_edge<Renderer>(
     scaled_corner_radius: f32,
     scaled_endpoint_extension: f32,
     scaled_edge_label_size: f32,
-    edge_color: fn(usize) -> (Color, Color),
+    edge_colors: (Color, Color),
     label_color: fn(usize) -> Color,
     edge: &crate::layout_engine::EdgeLayout,
     projected_points: &[Point],
@@ -2028,11 +2139,7 @@ fn draw_styled_edge<Renderer>(
     let endpoint_extension = scaled_endpoint_extension * width_scale;
     let label_size = scaled_edge_label_size * width_scale.max(0.25);
 
-    let (mut from_color, mut to_color) = edge_color(edge.index());
-    if let Some((from_override, to_override)) = style.color_override {
-        from_color = from_override;
-        to_color = to_override;
-    }
+    let (from_color, to_color) = edge_colors;
 
     draw_edge_with_label(
         frame,
@@ -3648,4 +3755,168 @@ fn normalize_outgoing_edge_style(style: OutgoingEdgeStyle) -> OutgoingEdgeStyle 
         alpha: style.alpha.clamp(0.0, 1.0),
         color_override: style.color_override,
     }
+}
+
+fn default_edge_gradient() -> (Color, Color) {
+    (Color::BLACK, Color::BLACK.scale_alpha(0.5))
+}
+
+fn edge_snapshot_context(edge_index: usize, edge: (u32, u32)) -> EdgeRenderContext {
+    EdgeRenderContext {
+        edge_index,
+        edge,
+        transition_progress: 1.0,
+        transition_state: EdgeTransitionState::Snapshot,
+    }
+}
+
+fn edge_transition_snapshot(
+    animation: Animation,
+    easing: &Easing,
+    duration: Duration,
+) -> EdgeTransitionSnapshot {
+    match animation {
+        Animation::Pending => EdgeTransitionSnapshot {
+            state: EdgeTransitionState::Pending,
+            progress: 0.0,
+        },
+        Animation::Active { .. } => EdgeTransitionSnapshot {
+            state: EdgeTransitionState::Active,
+            progress: animation.progress(easing, duration).unwrap_or(1.0),
+        },
+        Animation::Complete => EdgeTransitionSnapshot {
+            state: EdgeTransitionState::Complete,
+            progress: 1.0,
+        },
+    }
+}
+
+fn edge_transition_context(
+    edge_index: usize,
+    edge: (u32, u32),
+    transition: EdgeTransitionSnapshot,
+) -> EdgeRenderContext {
+    EdgeRenderContext {
+        edge_index,
+        edge,
+        transition_progress: transition.progress,
+        transition_state: transition.state,
+    }
+}
+
+fn snapshot_edge_styles(
+    edges: &[(u32, u32)],
+    edge_style: &dyn Fn(EdgeRenderContext) -> OutgoingEdgeStyle,
+) -> HashMap<usize, OutgoingEdgeStyle> {
+    edges
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, edge)| {
+            (
+                index,
+                normalize_outgoing_edge_style(edge_style(edge_snapshot_context(index, edge))),
+            )
+        })
+        .collect::<HashMap<_, _>>()
+}
+
+fn snapshot_edge_colors(
+    edges: &[(u32, u32)],
+    edge_color: &dyn Fn(EdgeRenderContext) -> (Color, Color),
+) -> HashMap<usize, (Color, Color)> {
+    edges
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, edge)| (index, edge_color(edge_snapshot_context(index, edge))))
+        .collect::<HashMap<_, _>>()
+}
+
+fn resolved_edge_colors(base_colors: (Color, Color), style: OutgoingEdgeStyle) -> (Color, Color) {
+    style.color_override.unwrap_or(base_colors)
+}
+
+fn interpolate_edge_gradient(
+    old: (Color, Color),
+    new: (Color, Color),
+    progress: f32,
+) -> (Color, Color) {
+    (
+        interpolate_color(old.0, new.0, progress),
+        interpolate_color(old.1, new.1, progress),
+    )
+}
+
+fn interpolate_color(old: Color, new: Color, progress: f32) -> Color {
+    let t = progress.clamp(0.0, 1.0);
+    Color {
+        r: old.r + (new.r - old.r) * t,
+        g: old.g + (new.g - old.g) * t,
+        b: old.b + (new.b - old.b) * t,
+        a: old.a + (new.a - old.a) * t,
+    }
+}
+
+fn interpolate_outgoing_edge_style(
+    old: OutgoingEdgeStyle,
+    new: OutgoingEdgeStyle,
+    progress: f32,
+) -> OutgoingEdgeStyle {
+    let t = progress.clamp(0.0, 1.0);
+
+    OutgoingEdgeStyle {
+        visible: old.visible || new.visible,
+        width_scale: (old.width_scale + (new.width_scale - old.width_scale) * t).max(0.0),
+        alpha: (old.alpha + (new.alpha - old.alpha) * t).clamp(0.0, 1.0),
+        color_override: None,
+    }
+}
+
+fn hash_outgoing_edge_style_map(map: Option<&HashMap<usize, OutgoingEdgeStyle>>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+
+    if let Some(map) = map {
+        let mut entries = map.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|(index, _)| **index);
+        for (index, style) in entries {
+            index.hash(&mut hasher);
+            style.visible.hash(&mut hasher);
+            style.width_scale.to_bits().hash(&mut hasher);
+            style.alpha.to_bits().hash(&mut hasher);
+            match style.color_override {
+                Some((from, to)) => {
+                    true.hash(&mut hasher);
+                    hash_color(&mut hasher, from);
+                    hash_color(&mut hasher, to);
+                }
+                None => false.hash(&mut hasher),
+            }
+        }
+    }
+
+    hasher.finish()
+}
+
+fn hash_edge_color_map(map: Option<&HashMap<usize, (Color, Color)>>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+
+    if let Some(map) = map {
+        let mut entries = map.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|(index, _)| **index);
+        for (index, (from, to)) in entries {
+            index.hash(&mut hasher);
+            hash_color(&mut hasher, *from);
+            hash_color(&mut hasher, *to);
+        }
+    }
+
+    hasher.finish()
+}
+
+fn hash_color(hasher: &mut impl Hasher, color: Color) {
+    color.r.to_bits().hash(hasher);
+    color.g.to_bits().hash(hasher);
+    color.b.to_bits().hash(hasher);
+    color.a.to_bits().hash(hasher);
 }

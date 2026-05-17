@@ -3,6 +3,20 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;
 
 use log::{error, info};
+use petgraph::stable_graph::{NodeIndex, StableDiGraph};
+
+mod ported;
+
+mod configure {
+    pub use crate::{Config, CrossingMinimization, RankingType};
+}
+
+mod util {
+    pub use crate::ported::util::*;
+}
+
+type Layout = (Vec<(usize, (f64, f64))>, f64, f64);
+type Layouts<T> = Vec<(Vec<(T, (f64, f64))>, f64, f64)>;
 
 const DEFAULT_NODE_SIZE: (f64, f64) = (56.0, 32.0);
 const COMPONENT_GAP: f64 = 80.0;
@@ -366,6 +380,46 @@ impl GraphLayout {
     }
 }
 
+fn resolve_ported_config(config: &Config) -> Config {
+    let mut resolved = *config;
+    if matches!(resolved.ranking_type, RankingType::Hybrid) {
+        resolved.ranking_type = if resolved.hybrid_weight >= 0.5 {
+            RankingType::Original
+        } else {
+            RankingType::MinimizeEdgeLength
+        };
+    }
+    resolved
+}
+
+fn from_graph<V, E>(
+    graph: &StableDiGraph<V, E>,
+    vertex_size: &impl Fn(NodeIndex, &V) -> (f64, f64),
+    config: &Config,
+) -> Layouts<NodeIndex> {
+    let graph = graph.map(
+        |id, v| {
+            let (w, h) = sanitize_node_size(vertex_size(id, v));
+            ported::algorithm::Vertex::new(id.index(), (w, h))
+        },
+        |_, _| ported::algorithm::Edge::default(),
+    );
+
+    ported::algorithm::start(graph, config)
+        .into_iter()
+        .map(|(layout, width, height)| {
+            (
+                layout
+                    .into_iter()
+                    .map(|(id, coords)| (NodeIndex::from(id as u32), coords))
+                    .collect(),
+                width,
+                height,
+            )
+        })
+        .collect()
+}
+
 pub fn layout_graph(
     nodes: &[u32],
     edges: &[(u32, u32)],
@@ -379,123 +433,125 @@ pub fn layout_graph(
         return GraphLayout::empty();
     }
 
-    info!(target: "layout", "Starting phase 0 [decompose]");
-    let mut node_by_id: HashMap<u32, usize> = HashMap::new();
-    let mut sized_nodes = Vec::with_capacity(nodes.len());
-    for (position, node_id) in nodes.iter().copied().enumerate() {
-        node_by_id.entry(node_id).or_insert(position);
-        let (width, height) = sanitize_node_size(node_size(node_id));
-        sized_nodes.push(SizedNode { width, height });
+    info!(target: "layout", "Starting phase 0 [build_graph]");
+    let mut graph_node_indices = HashMap::<u32, NodeIndex>::new();
+    let mut graph = StableDiGraph::<u32, usize>::new();
+    for node in nodes {
+        let index = graph.add_node(*node);
+        graph_node_indices.insert(*node, index);
     }
 
-    let mut input_edges = Vec::with_capacity(edges.len());
-    for (index, &(tail, head)) in edges.iter().enumerate() {
-        let (Some(&tail_pos), Some(&head_pos)) = (node_by_id.get(&tail), node_by_id.get(&head))
-        else {
+    for (edge_index, (from, to)) in edges.iter().copied().enumerate() {
+        let (Some(from_idx), Some(to_idx)) = (
+            graph_node_indices.get(&from).copied(),
+            graph_node_indices.get(&to).copied(),
+        ) else {
             continue;
         };
-        input_edges.push(InputEdge {
-            index,
-            tail: tail_pos,
-            head: head_pos,
-            min_len: config.minimum_length.max(1) as i32,
-            label: edge_label(index, (tail, head)),
-        });
+        graph.add_edge(from_idx, to_idx, edge_index);
     }
 
-    let node_cluster_paths = compute_node_cluster_paths(clusters, &node_by_id, nodes.len());
+    let cluster_specs = clusters
+        .iter()
+        .enumerate()
+        .map(|(cluster_index, cluster)| ported::advanced::ClusterSpec {
+            id: cluster_index,
+            nodes: cluster
+                .nodes()
+                .iter()
+                .filter_map(|node| graph_node_indices.get(node).copied())
+                .collect(),
+            padding: cluster.padding_value(),
+            parent: cluster.parent_index(),
+        })
+        .collect::<Vec<_>>();
 
-    let components = connected_components(nodes.len(), &input_edges, &node_cluster_paths);
-    let mut global_positions = BTreeMap::new();
-    let mut routed_edges = Vec::<RoutedEdge>::new();
+    let resolved_config = resolve_ported_config(config);
+    let render_config = ported::advanced::RenderConfig {
+        routing_padding: render_config.routing_padding,
+        bend_penalty: render_config.bend_penalty,
+        cluster_padding: render_config.cluster_padding,
+        cluster_constraint_iterations: render_config.cluster_constraint_iterations,
+        cluster_boundary_gap: render_config.cluster_boundary_gap,
+    };
+    let detailed = ported::advanced::from_graph_with_features(
+        &graph,
+        &|_, node| sanitize_node_size(node_size(*node)),
+        &|_, edge_idx| {
+            let edge_index = *edge_idx;
+            edges
+                .get(edge_index)
+                .and_then(|edge| edge_label(edge_index, *edge))
+        },
+        &cluster_specs,
+        &resolved_config,
+        &render_config,
+    );
+
+    let node_to_position: HashMap<u32, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(position, node)| (*node, position))
+        .collect();
+
+    let mut coords = BTreeMap::new();
+    let mut merged_edges = Vec::new();
+    let mut merged_clusters = Vec::new();
     let mut x_offset = 0.0;
-    let mut max_y = 0.0;
-    let mut max_x = 0.0;
-
-    for component_nodes in components {
-        let component_set: HashSet<usize> = component_nodes.iter().copied().collect();
-        let component_edges: Vec<_> = input_edges
-            .iter()
-            .filter(|edge| component_set.contains(&edge.tail) && component_set.contains(&edge.head))
-            .cloned()
-            .collect();
-
-        if component_nodes.is_empty() {
-            continue;
-        }
-
-        let component = layout_component(
-            &sized_nodes,
-            &component_nodes,
-            &component_edges,
-            config,
-            render_config,
-            &node_cluster_paths,
-        );
-
-        for (position, (x, y)) in component.node_positions {
-            let gx = x + x_offset;
-            global_positions.insert(position, (gx, y));
-            if gx > max_x {
-                max_x = gx;
-            }
-            if y > max_y {
-                max_y = y;
+    let mut max_y = 1.0f64;
+    let total_components = detailed.len();
+    for (component_idx, component) in detailed.into_iter().enumerate() {
+        for node in component.nodes {
+            let graph_node = graph[node.id];
+            if let Some(position) = node_to_position.get(&graph_node).copied() {
+                coords.insert(position, (node.center.0 + x_offset, node.center.1));
             }
         }
 
-        for mut edge in component.edges {
-            for point in &mut edge.points {
-                point.0 += x_offset;
-            }
-            routed_edges.push(edge);
+        for edge in component.edges {
+            let index = *graph.edge_weight(edge.id).unwrap_or(&edge.id.index());
+            let points: Vec<(f64, f64)> = edge
+                .points
+                .into_iter()
+                .map(|(x, y)| (x + x_offset, y))
+                .collect();
+            let curve_points = polyline_to_curve(&points);
+            merged_edges.push(EdgeLayout {
+                index,
+                points,
+                curve_points,
+                label: edge.label.as_ref().map(|label| label.value.clone()),
+                label_position: edge
+                    .label
+                    .as_ref()
+                    .map(|label| (label.position.0 + x_offset, label.position.1)),
+            });
         }
 
-        if component.width > 0.0 {
-            x_offset += component.width + COMPONENT_GAP;
+        for cluster in component.clusters {
+            merged_clusters.push(ClusterLayout {
+                index: cluster.id,
+                parent: cluster.parent,
+                min_x: cluster.bounds.min_x + x_offset,
+                min_y: cluster.bounds.min_y,
+                max_x: cluster.bounds.max_x + x_offset,
+                max_y: cluster.bounds.max_y,
+            });
         }
-    }
 
-    let cluster_layouts = compute_cluster_layouts(
-        clusters,
-        &node_by_id,
-        &global_positions,
-        &sized_nodes,
-        render_config,
-    );
-    clip_edges_to_clusters(
-        &mut routed_edges,
-        edges,
-        &node_by_id,
-        clusters,
-        &cluster_layouts,
-        render_config,
-        &node_cluster_paths,
-    );
-
-    let mut edge_layouts = Vec::with_capacity(routed_edges.len());
-    for route in routed_edges {
-        let curve = polyline_to_curve(&route.points);
-        edge_layouts.push(EdgeLayout {
-            index: route.index,
-            points: route.points,
-            curve_points: curve,
-            label: route.label,
-            label_position: route.label_position,
-        });
-    }
-
-    for cluster in &cluster_layouts {
-        max_x = max_x.max(cluster.max_x);
-        max_y = max_y.max(cluster.max_y);
+        max_y = max_y.max(component.height);
+        x_offset += component.width;
+        if component_idx + 1 < total_components {
+            x_offset += COMPONENT_GAP;
+        }
     }
 
     GraphLayout {
-        max_x: (max_x + config.vertex_spacing).max(1.0),
-        max_y: (max_y + config.vertex_spacing).max(1.0),
-        coords: global_positions,
-        edges: edge_layouts,
-        clusters: cluster_layouts,
+        max_x: x_offset.max(0.0),
+        max_y,
+        coords,
+        edges: merged_edges,
+        clusters: merged_clusters,
     }
 }
 

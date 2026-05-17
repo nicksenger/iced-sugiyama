@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::mouse;
@@ -12,7 +12,9 @@ use iced::widget::canvas::{self, Path};
 use iced::widget::{Column, Container, button, container, text};
 use iced::window;
 use iced::window::Screenshot;
-use iced::{Alignment, Background, Color, Element, Font, Length, Task, Theme, border};
+use iced::{
+    Alignment, Background, Color, Element, Font, Length, Subscription, Task, Theme, border,
+};
 use iced::{Point, Rectangle, Vector};
 use iced_sugiyama::{Cluster, EdgeEndpointKind, Graph, Sugiyama};
 use serde_json::Value;
@@ -22,6 +24,8 @@ const GRAPH_FONT: Font = Font::with_name("Times New Roman");
 const NODE_BORDER_RADIUS: f32 = 16.0;
 const CLUSTER_BORDER_RADIUS: f32 = 18.0;
 const MIN_NODE_SIDE: f64 = 72.0;
+const CLUSTER_BORDER_TRANSITION_DURATION: Duration = Duration::from_millis(260);
+const CLUSTER_BORDER_HOLD_YELLOW_DURATION: Duration = Duration::from_millis(420);
 
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 800.0;
@@ -168,7 +172,17 @@ pub fn main() -> iced::Result {
         size: iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
         ..Default::default()
     })
+    .subscription(Moarificator::subscription)
     .run()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClusterBorderState {
+    Gray,
+    ToYellow { started_at: Instant },
+    Yellow { since: Instant },
+    ToGreen { started_at: Instant },
+    Green,
 }
 
 struct Moarificator {
@@ -178,6 +192,8 @@ struct Moarificator {
     graph: Graph,
     cluster_seed: u64,
     cluster_count: usize,
+    cluster_sizes: HashMap<usize, usize>,
+    cluster_border_states: HashMap<usize, ClusterBorderState>,
     pending_graphviz_png: Option<Vec<u8>>,
     pending_iced_screenshot: Option<Screenshot>,
 }
@@ -194,6 +210,8 @@ impl Moarificator {
             graph: initial_graph(seed, node_count),
             cluster_seed: seed,
             cluster_count,
+            cluster_sizes: HashMap::new(),
+            cluster_border_states: HashMap::new(),
             pending_graphviz_png: None,
             pending_iced_screenshot: None,
         }
@@ -290,6 +308,7 @@ fn parse_cluster_count_arg(raw_cluster_count: &str) -> usize {
 #[derive(Debug, Clone)]
 enum Message {
     AppStarted,
+    Tick(Instant),
     Moar(u32),
     RenderMergedPng,
     CaptureIcedView,
@@ -358,6 +377,7 @@ impl Moarificator {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AppStarted => {
+                self.update_cluster_border_states(Instant::now());
                 let resize = window::latest().and_then(|id| {
                     window::resize::<()>(id, iced::Size::new(WINDOW_WIDTH, WINDOW_HEIGHT)).discard()
                 });
@@ -367,6 +387,9 @@ impl Moarificator {
                 }
 
                 return resize;
+            }
+            Message::Tick(now) => {
+                self.advance_cluster_border_states(now);
             }
             Message::RenderMergedPng => {
                 self.export_in_progress = true;
@@ -477,7 +500,57 @@ impl Moarificator {
             },
         }
 
+        self.update_cluster_border_states(Instant::now());
         Task::none()
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        if self.cluster_border_states.values().any(|state| {
+            matches!(
+                state,
+                ClusterBorderState::ToYellow { .. }
+                    | ClusterBorderState::Yellow { .. }
+                    | ClusterBorderState::ToGreen { .. }
+            )
+        }) {
+            window::frames().map(Message::Tick)
+        } else {
+            Subscription::none()
+        }
+    }
+
+    fn update_cluster_border_states(&mut self, now: Instant) {
+        let clusters = build_clusters(&self.graph, self.cluster_seed, self.cluster_count);
+        let mut next_sizes = HashMap::new();
+        let mut next_states = HashMap::new();
+
+        for (index, cluster) in clusters.iter().enumerate() {
+            let next_size = cluster.nodes.len();
+            let previous_size = self.cluster_sizes.get(&index).copied().unwrap_or(next_size);
+            let previous_state = self
+                .cluster_border_states
+                .get(&index)
+                .copied()
+                .unwrap_or(ClusterBorderState::Gray);
+
+            let mut next_state = previous_state;
+            if next_size > previous_size {
+                next_state = ClusterBorderState::ToYellow { started_at: now };
+            }
+
+            next_sizes.insert(index, next_size);
+            next_states.insert(index, next_state);
+        }
+
+        self.cluster_sizes = next_sizes;
+        self.cluster_border_states = next_states;
+        self.advance_cluster_border_states(now);
+    }
+
+    fn advance_cluster_border_states(&mut self, now: Instant) {
+        for state in self.cluster_border_states.values_mut() {
+            *state = advance_cluster_border_state(*state, now);
+        }
     }
 
     fn maybe_merge_pngs(&mut self) -> Task<Message> {
@@ -541,6 +614,13 @@ impl Moarificator {
             .clusters(clusters)
             .render_config(render_config())
             .cluster_container(|idx, cluster| {
+                let border_color = cluster_border_color_for_state(
+                    *self
+                        .cluster_border_states
+                        .get(&idx)
+                        .unwrap_or(&ClusterBorderState::Gray),
+                    Instant::now(),
+                );
                 Some(
                     container(
                         container(
@@ -549,14 +629,14 @@ impl Moarificator {
                                 .size(14),
                         )
                         .padding([4, 8])
-                        .style(move |_| cluster_label_style(idx)),
+                        .style(move |_| cluster_label_style(border_color)),
                     )
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding(12)
                     .align_x(Horizontal::Left)
                     .align_y(Vertical::Top)
-                    .style(move |_| cluster_container_style(idx))
+                    .style(move |_| cluster_container_style(border_color))
                     .into(),
                 )
             })
@@ -1874,10 +1954,75 @@ fn edge_colors(index: usize) -> (iced::Color, iced::Color) {
     (blue, blue.scale_alpha(0.5))
 }
 
-fn cluster_color(index: usize) -> iced::Color {
-    match index % 2 {
-        0 => iced::Color::from_rgba8(255, 112, 67, 0.9),
-        _ => iced::Color::from_rgba8(46, 125, 50, 0.9),
+fn cluster_color_gray() -> iced::Color {
+    iced::Color::from_rgba8(117, 117, 117, 0.88)
+}
+
+fn cluster_color_yellow() -> iced::Color {
+    iced::Color::from_rgba8(253, 216, 53, 0.9)
+}
+
+fn cluster_color_green() -> iced::Color {
+    iced::Color::from_rgba8(67, 160, 71, 0.9)
+}
+
+fn lerp_color(from: Color, to: Color, t: f32) -> Color {
+    let clamped = t.clamp(0.0, 1.0);
+    Color::from_rgba(
+        from.r + (to.r - from.r) * clamped,
+        from.g + (to.g - from.g) * clamped,
+        from.b + (to.b - from.b) * clamped,
+        from.a + (to.a - from.a) * clamped,
+    )
+}
+
+fn transition_progress(started_at: Instant, now: Instant) -> f32 {
+    let elapsed = now.saturating_duration_since(started_at);
+    (elapsed.as_secs_f32() / CLUSTER_BORDER_TRANSITION_DURATION.as_secs_f32()).min(1.0)
+}
+
+fn advance_cluster_border_state(state: ClusterBorderState, now: Instant) -> ClusterBorderState {
+    match state {
+        ClusterBorderState::ToYellow { started_at } => {
+            if transition_progress(started_at, now) >= 1.0 {
+                ClusterBorderState::Yellow { since: now }
+            } else {
+                state
+            }
+        }
+        ClusterBorderState::Yellow { since } => {
+            if now.saturating_duration_since(since) >= CLUSTER_BORDER_HOLD_YELLOW_DURATION {
+                ClusterBorderState::ToGreen { started_at: now }
+            } else {
+                state
+            }
+        }
+        ClusterBorderState::ToGreen { started_at } => {
+            if transition_progress(started_at, now) >= 1.0 {
+                ClusterBorderState::Green
+            } else {
+                state
+            }
+        }
+        ClusterBorderState::Gray | ClusterBorderState::Green => state,
+    }
+}
+
+fn cluster_border_color_for_state(state: ClusterBorderState, now: Instant) -> Color {
+    match state {
+        ClusterBorderState::Gray => cluster_color_gray(),
+        ClusterBorderState::ToYellow { started_at } => lerp_color(
+            cluster_color_gray(),
+            cluster_color_yellow(),
+            transition_progress(started_at, now),
+        ),
+        ClusterBorderState::Yellow { .. } => cluster_color_yellow(),
+        ClusterBorderState::ToGreen { started_at } => lerp_color(
+            cluster_color_yellow(),
+            cluster_color_green(),
+            transition_progress(started_at, now),
+        ),
+        ClusterBorderState::Green => cluster_color_green(),
     }
 }
 
@@ -1893,8 +2038,7 @@ fn transparent_button_style(_theme: &Theme, _status: button::Status) -> button::
     }
 }
 
-fn cluster_container_style(index: usize) -> container::Style {
-    let color = cluster_color(index);
+fn cluster_container_style(color: Color) -> container::Style {
     container::Style::default()
         .color(color)
         .background(Background::Color(Color::TRANSPARENT))
@@ -1905,16 +2049,16 @@ fn cluster_container_style(index: usize) -> container::Style {
         )
 }
 
-fn cluster_label_style(index: usize) -> container::Style {
+fn cluster_label_style(color: Color) -> container::Style {
     container::Style::default()
-        .color(cluster_color(index))
+        .color(color)
         .background(Background::Color(Color::WHITE))
 }
 
 fn push_cluster_dot(dot: &mut String, clusters: &[Cluster], index: usize, indent: usize) {
     let indent_str = "    ".repeat(indent);
     let cluster = &clusters[index];
-    let color = color_to_hex(cluster_color(index));
+    let color = color_to_hex(cluster_color_gray());
     dot.push_str(&format!("{indent_str}subgraph cluster_{index} {{\n"));
     dot.push_str(&format!(
         "{indent_str}    label=\"{}\";\n",

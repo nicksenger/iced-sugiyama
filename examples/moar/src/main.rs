@@ -657,7 +657,7 @@ impl Moarificator {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let export_button: Element<'_, Message> = if self.export_in_progress {
+        let _export_button: Element<'_, Message> = if self.export_in_progress {
             container(
                 text("Render PNG")
                     .font(GRAPH_FONT)
@@ -1196,7 +1196,6 @@ struct ParsedPlainLayout {
 #[derive(Debug, Clone, Copy)]
 struct PlainNode {
     center: (f64, f64),
-    size: (f64, f64),
 }
 
 #[derive(Debug, Clone)]
@@ -1283,11 +1282,12 @@ fn parse_plain_layout(input: &str) -> Result<ParsedPlainLayout, GraphvizOutputEr
                     return Err(GraphvizOutputError::InvalidPlainOutput);
                 }
                 let id = parse_plain_u32(&tokens[1])?;
+                let _width = parse_plain_f64(&tokens[4])?;
+                let _height = parse_plain_f64(&tokens[5])?;
                 layout.nodes.insert(
                     id,
                     PlainNode {
                         center: (parse_plain_f64(&tokens[2])?, parse_plain_f64(&tokens[3])?),
-                        size: (parse_plain_f64(&tokens[4])?, parse_plain_f64(&tokens[5])?),
                     },
                 );
             }

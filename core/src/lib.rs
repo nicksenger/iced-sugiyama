@@ -1,3 +1,6 @@
+// Legacy backend internals are still kept during the backend transition.
+#![allow(dead_code)]
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;

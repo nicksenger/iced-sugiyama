@@ -64,6 +64,7 @@ struct ViewportState {
     velocity: Vector,
     drag: Option<DragState>,
     last_tick: Option<Instant>,
+    pending_fit_to_view: bool,
 }
 
 impl Default for ViewportState {
@@ -74,6 +75,7 @@ impl Default for ViewportState {
             velocity: Vector::new(0.0, 0.0),
             drag: None,
             last_tick: None,
+            pending_fit_to_view: false,
         }
     }
 }
@@ -156,6 +158,25 @@ impl SharedViewport {
         state.velocity = Vector::new(0.0, 0.0);
 
         true
+    }
+
+    fn apply_view(&self, pan: Vector, zoom: f32) {
+        let mut state = self.0.borrow_mut();
+        state.pan = pan;
+        state.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        state.velocity = Vector::new(0.0, 0.0);
+        state.drag = None;
+    }
+
+    fn request_fit_to_view(&self) {
+        self.0.borrow_mut().pending_fit_to_view = true;
+    }
+
+    fn take_fit_to_view_request(&self) -> bool {
+        let mut state = self.0.borrow_mut();
+        let requested = state.pending_fit_to_view;
+        state.pending_fit_to_view = false;
+        requested
     }
 
     fn tick(&self, now: Instant) -> bool {
@@ -300,7 +321,33 @@ impl Graph {
 #[derive(Clone)]
 pub enum Event<Message> {
     Passthrough(Message),
+    Viewport(ViewportInteraction),
     Noop,
+}
+
+impl<Message> From<ViewportInteraction> for Event<Message> {
+    fn from(value: ViewportInteraction) -> Self {
+        Self::Viewport(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AutoFit {
+    Off,
+    Initial,
+    Ongoing,
+}
+
+impl Default for AutoFit {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViewportInteraction {
+    UserPanned,
+    UserZoomed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -425,6 +472,9 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
     padding: Padding,
     motion_easing: &'static motion::easing::Easing,
     motion_duration: Duration,
+    auto_fit: AutoFit,
+    keep_centered: bool,
+    on_viewport_interaction: Option<Box<dyn Fn(ViewportInteraction) -> Message + 'a>>,
 }
 
 impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
@@ -453,6 +503,9 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
             padding: iced::Padding::ZERO,
             motion_easing: &motion::easing::EMPHASIZED,
             motion_duration: motion::duration::MEDIUM_4,
+            auto_fit: AutoFit::Off,
+            keep_centered: false,
+            on_viewport_interaction: None,
         }
     }
 
@@ -573,6 +626,24 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
 
     pub fn animation_duration(mut self, duration: Duration) -> Self {
         self.motion_duration = duration;
+        self
+    }
+
+    pub fn auto_fit(mut self, auto_fit: AutoFit) -> Self {
+        self.auto_fit = auto_fit;
+        self
+    }
+
+    pub fn keep_centered(mut self, keep_centered: bool) -> Self {
+        self.keep_centered = keep_centered;
+        self
+    }
+
+    pub fn on_viewport_interaction(
+        mut self,
+        f: impl Fn(ViewportInteraction) -> Message + 'a,
+    ) -> Self {
+        self.on_viewport_interaction = Some(Box::new(f));
         self
     }
 }
@@ -784,6 +855,7 @@ where
                     children,
                     nodes: self.graph.nodes.clone(),
                     sugiyama: sugiyama.clone(),
+                    graph_signature: signature,
                     old_sugiyama: old_sugiyama.clone(),
                     node_map: node_map.clone(),
                     old_node_map,
@@ -797,6 +869,8 @@ where
                     motion_duration: self.motion_duration,
                     animation: animation.clone(),
                     viewport: viewport.clone(),
+                    auto_fit: self.auto_fit,
+                    keep_centered: self.keep_centered,
                 };
 
                 Switch::new(
@@ -834,6 +908,13 @@ where
     }
 
     fn update(&mut self, state: &mut Self::State, event: Self::Event) -> Option<Message> {
+        if let Event::Viewport(interaction) = event {
+            return self
+                .on_viewport_interaction
+                .as_ref()
+                .map(|handler| handler(interaction));
+        }
+
         state.switch_state.flip();
         let signature = crate::layout_engine::layout_signature(
             &self.graph.nodes,
@@ -868,6 +949,7 @@ where
 
         match event {
             Event::Noop => None,
+            Event::Viewport(_) => None,
             Event::Passthrough(message) => Some(message),
         }
     }
@@ -916,6 +998,13 @@ where
             state.refresh_nonce = state.refresh_nonce.saturating_add(1);
         }
 
+        let mut viewport_control_request = ViewportControlRequest::default();
+        operation.custom(self.id.as_ref(), bounds, &mut viewport_control_request);
+        if viewport_control_request.fit_to_view {
+            state.viewport.request_fit_to_view();
+            state.refresh_nonce = state.refresh_nonce.saturating_add(1);
+        }
+
         operation.custom(self.id.as_ref(), bounds, &mut state.refresh_nonce);
     }
 }
@@ -937,6 +1026,11 @@ pub struct SugiyamaState {
 #[derive(Default)]
 struct InvalidateRequest {
     requested: bool,
+}
+
+#[derive(Default)]
+struct ViewportControlRequest {
+    fit_to_view: bool,
 }
 
 struct GraphCanvas<Renderer>
@@ -1524,6 +1618,43 @@ where
     .discard()
 }
 
+/// Produces a [`Task`] that requests an immediate fit of the graph to the
+/// current viewport for the widget with the given [`Id`].
+pub fn fit_to_view<Message>(id: impl Into<Id>) -> Task<Message>
+where
+    Message: Send + 'static,
+{
+    struct FitToView {
+        target: widget::Id,
+    }
+
+    impl<T> widget::Operation<T> for FitToView {
+        fn custom(
+            &mut self,
+            id: Option<&widget::Id>,
+            _bounds: iced::Rectangle,
+            state: &mut dyn std::any::Any,
+        ) {
+            if id != Some(&self.target) {
+                return;
+            }
+
+            if let Some(request) = state.downcast_mut::<ViewportControlRequest>() {
+                request.fit_to_view = true;
+            }
+        }
+
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn widget::Operation<T>)) {
+            operate(self);
+        }
+    }
+
+    iced::advanced::widget::operate::<()>(FitToView {
+        target: id.into().0,
+    })
+    .discard()
+}
+
 struct GraphNodes<Message, Theme, Renderer>
 where
     Renderer: iced::advanced::Renderer,
@@ -1531,6 +1662,7 @@ where
     children: Vec<Element<'static, Message, Theme, Renderer>>,
     nodes: Vec<u32>,
     sugiyama: GraphLayout,
+    graph_signature: u64,
     old_sugiyama: Option<GraphLayout>,
     node_map: HashMap<u32, usize>,
     old_node_map: Option<HashMap<u32, usize>>,
@@ -1544,6 +1676,29 @@ where
     motion_duration: Duration,
     animation: SharedAnimation,
     viewport: SharedViewport,
+    auto_fit: AutoFit,
+    keep_centered: bool,
+}
+
+#[derive(Clone)]
+struct GraphNodesState {
+    animation: SharedAnimation,
+    last_layout_signature: Option<u64>,
+    last_layout_size: Option<Size>,
+    initial_fit_applied: bool,
+    reported_pan_this_drag: bool,
+}
+
+impl GraphNodesState {
+    fn new(animation: SharedAnimation) -> Self {
+        Self {
+            animation,
+            last_layout_signature: None,
+            last_layout_size: None,
+            initial_fit_applied: false,
+            reported_pan_this_drag: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1567,6 +1722,7 @@ impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
     for GraphNodes<Message, Theme, Renderer>
 where
     Renderer: iced::advanced::Renderer,
+    Message: From<ViewportInteraction>,
 {
     fn size(&self) -> iced::Size<Length> {
         iced::Size {
@@ -1576,7 +1732,7 @@ where
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(self.animation.clone())
+        tree::State::new(GraphNodesState::new(self.animation.clone()))
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -1593,12 +1749,46 @@ where
         renderer: &Renderer,
         limits: &iced::advanced::layout::Limits,
     ) -> iced::advanced::layout::Node {
-        let state = tree.state.downcast_mut::<SharedAnimation>();
+        let state = tree.state.downcast_mut::<GraphNodesState>();
+        let animation = &state.animation;
         let limits = limits.shrink(Size {
             width: self.padding.left + self.padding.right,
             height: self.padding.top + self.padding.bottom,
         });
         let size = limits.max();
+
+        let signature_changed = state.last_layout_signature != Some(self.graph_signature);
+        let size_changed = state
+            .last_layout_size
+            .map(|previous| !almost_equal_f32(previous.width, size.width))
+            .unwrap_or(true)
+            || state
+                .last_layout_size
+                .map(|previous| !almost_equal_f32(previous.height, size.height))
+                .unwrap_or(true);
+        let fit_requested = self.viewport.take_fit_to_view_request();
+        let should_auto_fit = fit_requested
+            || match self.auto_fit {
+                AutoFit::Off => false,
+                AutoFit::Initial => !state.initial_fit_applied,
+                AutoFit::Ongoing => signature_changed || size_changed,
+            };
+        let should_auto_center = !should_auto_fit
+            && self.keep_centered
+            && (signature_changed || size_changed);
+
+        if should_auto_fit {
+            let zoom = fit_zoom(&self.sugiyama, size);
+            let pan = centered_pan(&self.sugiyama, size, zoom);
+            self.viewport.apply_view(pan, zoom);
+            state.initial_fit_applied = true;
+        } else if should_auto_center {
+            let current_zoom = self.viewport.get().zoom;
+            let pan = centered_pan(&self.sugiyama, size, current_zoom);
+            self.viewport.apply_view(pan, current_zoom);
+        }
+        state.last_layout_signature = Some(self.graph_signature);
+        state.last_layout_size = Some(size);
 
         let node_count = self.node_map.len();
         let cluster_container_layouts = cluster_container_layouts(
@@ -1606,7 +1796,7 @@ where
             self.old_sugiyama.as_ref(),
             &self.cluster_container_children,
             size,
-            state,
+            animation,
             self.motion_easing,
             self.motion_duration,
         );
@@ -1644,7 +1834,7 @@ where
             &self.edges,
             &node_sizes,
             size,
-            state,
+            animation,
             self.motion_easing,
             self.motion_duration,
         );
@@ -1653,7 +1843,7 @@ where
             self.old_sugiyama.as_ref(),
             &self.edge_label_children,
             size,
-            state,
+            animation,
             self.motion_easing,
             self.motion_duration,
         );
@@ -1665,7 +1855,7 @@ where
             &node_sizes,
             &self.edge_endpoint_children,
             size,
-            state,
+            animation,
             self.motion_easing,
             self.motion_duration,
             self.edge_endpoint_extension,
@@ -1815,7 +2005,8 @@ where
         shell: &mut iced::advanced::Shell<'_, Message>,
         viewport: &iced::Rectangle,
     ) {
-        let animation = tree.state.downcast_mut::<SharedAnimation>();
+        let state = tree.state.downcast_mut::<GraphNodesState>();
+        let animation = &state.animation;
         if let Animation::Pending = animation.get() {
             animation.set(Animation::Active {
                 start: Instant::now(),
@@ -1851,6 +2042,7 @@ where
                         | iced::mouse::ScrollDelta::Pixels { y, .. } => *y,
                     };
                     if self.viewport.zoom_at(delta_y, position, inner_size) {
+                        shell.publish(ViewportInteraction::UserZoomed.into());
                         shell.invalidate_layout();
                         shell.request_redraw();
                         viewport_status = event::Status::Captured;
@@ -1861,6 +2053,7 @@ where
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
                 if let Some(position) = inner_cursor {
                     self.viewport.begin_drag(position, Instant::now());
+                    state.reported_pan_this_drag = false;
                 }
             }
             iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
@@ -1869,6 +2062,10 @@ where
                         let captured = self.viewport.drag_to(position, Instant::now());
                         shell.invalidate_layout();
                         shell.request_redraw();
+                        if captured && !state.reported_pan_this_drag {
+                            shell.publish(ViewportInteraction::UserPanned.into());
+                            state.reported_pan_this_drag = true;
+                        }
                         if captured {
                             viewport_status = event::Status::Captured;
                         }
@@ -1878,6 +2075,7 @@ where
             }
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
                 let captured = self.viewport.end_drag(Instant::now());
+                state.reported_pan_this_drag = false;
                 if self.viewport.is_moving() {
                     shell.request_redraw();
                 }
@@ -2631,6 +2829,29 @@ fn layout_offset(sugiyama: &GraphLayout, size: iced::Size) -> Vector {
         x: (size.width - sugiyama.max_x() as f32).max(0.0) * 0.5,
         y: (size.height - sugiyama.max_y() as f32).max(0.0) * 0.5,
     }
+}
+
+fn fit_zoom(sugiyama: &GraphLayout, size: iced::Size) -> f32 {
+    let graph_width = (sugiyama.max_x() as f32).max(1.0);
+    let graph_height = (sugiyama.max_y() as f32).max(1.0);
+    let zoom_x = size.width.max(1.0) / graph_width;
+    let zoom_y = size.height.max(1.0) / graph_height;
+    zoom_x.min(zoom_y).clamp(MIN_ZOOM, MAX_ZOOM)
+}
+
+fn centered_pan(sugiyama: &GraphLayout, size: iced::Size, zoom: f32) -> Vector {
+    let graph_width = sugiyama.max_x() as f32;
+    let graph_height = sugiyama.max_y() as f32;
+    let offset = layout_offset(sugiyama, size);
+    let graph_center = Vector::new(
+        offset.x + graph_width * 0.5,
+        offset.y + graph_height * 0.5,
+    );
+    let viewport_center = Vector::new(size.width * 0.5, size.height * 0.5);
+    Vector::new(
+        (viewport_center.x - graph_center.x) * zoom,
+        (viewport_center.y - graph_center.y) * zoom,
+    )
 }
 
 fn edge_endpoint_metadata(
@@ -3791,7 +4012,7 @@ impl<'a, Message, Theme, Renderer> From<GraphNodes<Message, Theme, Renderer>>
     for Element<'a, Message, Theme, Renderer>
 where
     Renderer: iced::advanced::Renderer + 'a,
-    Message: Clone + 'a,
+    Message: Clone + From<ViewportInteraction> + 'a,
     Theme: 'a,
 {
     fn from(x: GraphNodes<Message, Theme, Renderer>) -> Self {

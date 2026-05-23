@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use log::{debug, trace};
+use log::debug;
 use petgraph::{
     stable_graph::{EdgeIndex, NodeIndex, StableDiGraph},
     visit::EdgeRef,
@@ -78,7 +78,6 @@ fn calculate_cut_values(graph: &mut StableDiGraph<Vertex, Edge>, mut queue: VecD
         };
 
         graph[edge].cut_value = Some(calculate_cut_value(graph[edge].weight, incoming, outgoing));
-        trace!(target: "cut_values", "Cut values for edge: {}, {:?}", edge.index(), graph[edge].cut_value);
         // continue traversing tree in direction of edge whose vertex was missing before
         queue.push_back(missing);
     }
@@ -89,7 +88,6 @@ fn calculate_cut_value(
     incoming: NeighborhoodInfo,
     outgoing: NeighborhoodInfo,
 ) -> i32 {
-    trace!(target: "cut_values", "Calculating cut value: edge_weight: {edge_weight}, data of incoming edges: {incoming:?}, data of outgoing edges: {outgoing:?}");
     edge_weight + incoming.non_tree_edge_weight_sum - incoming.cut_value_sum
         + incoming.tree_edge_weight_sum
         - outgoing.non_tree_edge_weight_sum
@@ -158,7 +156,6 @@ fn remove_outdated_cut_values(
                 let edge = graph.find_edge_undirected(l, parent).unwrap().0;
                 graph[edge].cut_value = None;
                 l = parent;
-                trace!(target: "cut_values", "current node in path: {}", l.index());
                 if graph[l].low <= graph[w].lim && graph[x].lim <= graph[l].lim
                     || graph[l].parent.is_none()
                 {

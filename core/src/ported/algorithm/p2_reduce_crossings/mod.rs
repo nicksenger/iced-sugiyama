@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 
-use log::trace;
 use petgraph::algo::toposort;
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 use petgraph::Direction::{Incoming, Outgoing};
@@ -202,11 +201,6 @@ pub(super) fn insert_dummy_vertices(
     for edge in graph.edge_indices().collect::<Vec<_>>() {
         if slack(graph, edge, minimum_length) > 0 {
             let (mut tail, head) = graph.edge_endpoints(edge).unwrap();
-            trace!(target: "crossing_reduction", 
-                "Inserting {} dummy vertices between: ({}, {})", 
-                graph[head].rank - graph[tail].rank - 1, 
-                tail.index(), 
-                head.index());
 
             // we don't need to remember edges that where removed
             graph.remove_edge(edge);
@@ -329,7 +323,6 @@ fn reduce_crossings_bilayer_sweep(
             self::transpose(graph, &mut order, i % 2 == 0);
         }
         let crossings = order.crossings(graph);
-        trace!(target: "crossing_reduction", "Current number of crossings: {crossings}");
         if crossings < best_crossings {
             best_crossings = crossings;
             best = order.clone();
@@ -345,9 +338,6 @@ fn reduce_crossings_bilayer_sweep(
 }
 
 fn transpose(graph: &StableDiGraph<Vertex, Edge>, order: &mut Order, move_down: bool) {
-    trace!(target: "crossings_reduction", 
-        "Using transpose, try to swap vertices in each layer manually to reduce cross count");
-
     let mut improved = true;
     let iter_dir = if move_down {
         IterDir::Forward
@@ -358,7 +348,6 @@ fn transpose(graph: &StableDiGraph<Vertex, Edge>, order: &mut Order, move_down: 
     while improved {
         improved = false;
         for r in iterate(iter_dir, order.max_rank()) {
-            trace!(target: "reduce_crossings", "Transpose vertices in rank {r}");
             for i in 0..order._inner[r].len() - 1 {
                 let v = order._inner[r][i];
                 let w = order._inner[r][i + 1];
@@ -370,7 +359,6 @@ fn transpose(graph: &StableDiGraph<Vertex, Edge>, order: &mut Order, move_down: 
                 }
             }
         }
-        trace!(target: "reduce_crossings", "Did improve: {improved}");
     }
 }
 
@@ -391,15 +379,6 @@ fn order_layer(
     };
 
     for rank in dir {
-        trace!(target: "crossing_reduction", "Updating order of vertices in rank {rank}");
-        trace!(target: "crossing_reduction", "Original order: {:?}",
-            cur_order[rank]
-                .iter()
-                .map(|v| v.index())
-                .collect::<Vec<_>>()
-                .as_slice()
-        );
-
         new_order[rank].clone_from(&cur_order[rank]);
         let ordering = new_order[rank]
             .iter()
@@ -411,13 +390,6 @@ fn order_layer(
         new_order[rank].iter().enumerate().for_each(|(pos, v)| {
             positions.insert(*v, pos);
         });
-        trace!(target: "crossing_reduction", "Updated order : {:?}",
-            new_order[rank]
-                .iter()
-                .map(|v| v.index())
-                .collect::<Vec<_>>()
-                .as_slice()
-        );
     }
 
     Order::new(new_order)

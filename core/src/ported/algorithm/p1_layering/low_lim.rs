@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use log::{debug, trace};
+use log::debug;
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 
 use super::{Edge, Vertex};
@@ -10,7 +10,6 @@ pub(super) fn init_low_lim(graph: &mut StableDiGraph<Vertex, Edge>) {
     let root = graph.node_indices().next().unwrap();
     debug!(target: "low_lim", "root of tree: {}", root.index());
     let mut max_lim = graph.node_count() as u32;
-    trace!(target: "low_lim", "Maximum Lim value: {max_lim}");
     dfs_low_lim(graph, root, None, &mut max_lim, &mut HashSet::new());
 }
 
@@ -24,7 +23,6 @@ pub(super) fn update_low_lim(
         None => HashSet::new(),
     };
     let mut max_lim = graph[least_common_ancestor].lim;
-    trace!(target: "low_lim", "Maximum Lim value: {max_lim}");
     dfs_low_lim(
         graph,
         least_common_ancestor,
@@ -53,12 +51,6 @@ fn dfs_low_lim(
         }
     }
     graph[next].low = *max_lim;
-    trace!(target: "low_lim", 
-        "Vertex: {}, low: {}, lim: {}, parent: {:?}", 
-        next.index(), 
-        graph[next].low,
-        graph[next].lim, 
-        graph[next].parent);
 }
 
 #[cfg(any())]

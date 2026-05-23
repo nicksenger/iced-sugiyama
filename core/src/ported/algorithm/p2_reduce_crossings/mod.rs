@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 
-use log::{debug, trace};
+use log::trace;
 use petgraph::algo::toposort;
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 use petgraph::Direction::{Incoming, Outgoing};
@@ -321,7 +321,6 @@ fn reduce_crossings_bilayer_sweep(
     transpose: bool,
 ) -> Order {
     let mut best_crossings = order.crossings(graph);
-    debug!(target: "crossing_reduction", "Initial number of crossings: {best_crossings}");
     let mut last_best = 0;
     let mut best = order.clone();
     for i in 0.. {
@@ -333,7 +332,6 @@ fn reduce_crossings_bilayer_sweep(
         trace!(target: "crossing_reduction", "Current number of crossings: {crossings}");
         if crossings < best_crossings {
             best_crossings = crossings;
-            debug!(target: "crossing_reduction", "Lowest number of crossings so far: {best_crossings}");
             best = order.clone();
             last_best = 0;
         } else {

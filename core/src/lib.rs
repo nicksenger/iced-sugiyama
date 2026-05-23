@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;
 
-use log::{error, info};
+use log::error;
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 
 mod ported;
@@ -436,7 +436,6 @@ pub fn layout_graph(
         return GraphLayout::empty();
     }
 
-    info!(target: "layout", "Starting phase 0 [build_graph]");
     let mut graph_node_indices = HashMap::<u32, NodeIndex>::new();
     let mut graph = StableDiGraph::<u32, usize>::new();
     for node in nodes {
@@ -803,7 +802,6 @@ fn layout_component(
         })
         .collect();
 
-    info!(target: "layout", "Starting phase 1 [dot_rank]");
     let mut ranks = assign_ranks(
         local_count,
         &oriented_edges,
@@ -822,7 +820,6 @@ fn layout_component(
         }
     }
 
-    info!(target: "layout", "Starting phase 2 [dot_mincross]");
     let mut layer_nodes = Vec::<LayerNode>::new();
     let mut layers = vec![Vec::<usize>::new(); (max_rank(&ranks) + 1).max(1)];
     let mut real_layer_node = vec![0usize; local_count];
@@ -1025,7 +1022,6 @@ fn layout_component(
         &flat_order_constraints,
     );
 
-    info!(target: "layout", "Starting phase 3 [dot_position]");
     let width = assign_coordinates(
         &layers,
         &mut layer_nodes,
@@ -1045,7 +1041,6 @@ fn layout_component(
         node_positions.insert(global, (node.x, node.y));
     }
 
-    info!(target: "layout", "Starting phase 4 [dot_splines]");
     let mut grouped_multi_edges: HashMap<(usize, usize), Vec<&DirectedEdge>> = HashMap::new();
     for edge in &oriented_edges {
         grouped_multi_edges
@@ -3287,8 +3282,6 @@ fn clip_edges_to_clusters(
     if routed_edges.is_empty() || cluster_layouts.is_empty() || clusters.is_empty() {
         return;
     }
-
-    info!(target: "layout", "Starting phase 5 [dot_compoundEdges]");
 
     let mut cluster_bounds = HashMap::<usize, Bounds>::new();
     for cluster in cluster_layouts {

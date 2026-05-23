@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use log::debug;
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 
 pub fn weakly_connected_components<V: Copy, E: Copy>(
@@ -31,8 +30,6 @@ pub fn weakly_connected_components<V: Copy, E: Copy>(
         });
         components.push(component);
     }
-    debug!(target: "connected_components", "Found {} components", components.len());
-
     components
 }
 

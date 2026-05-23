@@ -18,7 +18,6 @@
 //! and references used.
 use std::collections::{BTreeMap, HashMap};
 
-use log::debug;
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 
 use crate::configure::{Config, CrossingMinimization, RankingType};
@@ -149,13 +148,7 @@ fn build_layout(mut graph: StableDiGraph<Vertex, Edge>, config: &Config) -> Layo
         config.transpose,
     );
 
-    let layout = execute_phase_3(&mut graph, layers);
-    debug!(target: "layouting", "Coordinates: {:?}\nwidth: {}, height:{}",
-        layout.0,
-        layout.1,
-        layout.2
-    );
-    layout
+    execute_phase_3(&mut graph, layers)
 }
 
 fn execute_phase_0(graph: &mut StableDiGraph<Vertex, Edge>) -> Vec<EdgeIndex> {

@@ -230,24 +230,21 @@ where
             edge.curve_points()
         };
 
-        let _ = write!(plain, "edge {tail} {head} {}", points.len());
+        plain.push_str(&format!("edge {tail} {head} {}", points.len()));
         for &(x, y) in points {
-            let _ = write!(
-                plain,
-                " {} {}",
-                format_plain_number(to_plain_x(x)),
-                format_plain_number(to_plain_y(&layout, y))
-            );
+            plain.push(' ');
+            plain.push_str(&format_plain_number(to_plain_x(x)));
+            plain.push(' ');
+            plain.push_str(&format_plain_number(to_plain_y(&layout, y)));
         }
 
         if let (Some(label), Some((label_x, label_y))) = (edge.label(), edge.label_position()) {
-            let _ = write!(
-                plain,
-                " {} {} {}",
-                format_plain_label(label),
-                format_plain_number(to_plain_x(label_x)),
-                format_plain_number(to_plain_y(&layout, label_y))
-            );
+            plain.push(' ');
+            plain.push_str(&format_plain_label(label));
+            plain.push(' ');
+            plain.push_str(&format_plain_number(to_plain_x(label_x)));
+            plain.push(' ');
+            plain.push_str(&format_plain_number(to_plain_y(&layout, label_y)));
         }
 
         let _ = writeln!(plain);

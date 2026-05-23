@@ -1773,9 +1773,8 @@ where
                 AutoFit::Initial => !state.initial_fit_applied,
                 AutoFit::Ongoing => signature_changed || size_changed,
             };
-        let should_auto_center = !should_auto_fit
-            && self.keep_centered
-            && (signature_changed || size_changed);
+        let should_auto_center =
+            !should_auto_fit && self.keep_centered && (signature_changed || size_changed);
 
         if should_auto_fit {
             let zoom = fit_zoom(&self.sugiyama, size);
@@ -2843,10 +2842,7 @@ fn centered_pan(sugiyama: &GraphLayout, size: iced::Size, zoom: f32) -> Vector {
     let graph_width = sugiyama.max_x() as f32;
     let graph_height = sugiyama.max_y() as f32;
     let offset = layout_offset(sugiyama, size);
-    let graph_center = Vector::new(
-        offset.x + graph_width * 0.5,
-        offset.y + graph_height * 0.5,
-    );
+    let graph_center = Vector::new(offset.x + graph_width * 0.5, offset.y + graph_height * 0.5);
     let viewport_center = Vector::new(size.width * 0.5, size.height * 0.5);
     Vector::new(
         (viewport_center.x - graph_center.x) * zoom,

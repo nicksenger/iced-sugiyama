@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 
-use log::{debug, info, trace};
+use log::{debug, trace};
 use petgraph::algo::toposort;
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 use petgraph::Direction::{Incoming, Outgoing};
@@ -199,7 +199,6 @@ pub(super) fn insert_dummy_vertices(
 ) {
     // find all edges that have slack of greater than 0.
     // and insert dummy vertices
-    info!(target: "crossing_reduction", "Inserting dummy vertices for edges spanning more than {minimum_length} ranks");
     for edge in graph.edge_indices().collect::<Vec<_>>() {
         if slack(graph, edge, minimum_length) > 0 {
             let (mut tail, head) = graph.edge_endpoints(edge).unwrap();
@@ -240,7 +239,6 @@ pub(super) fn remove_dummy_vertices(
     // follow them until the other non dummy node is found
     // insert old edge
     // remove all dummy nodes
-    info!(target: "crossing_reduction", "Removing dummy vertices and inserting original edges.");
     let vertices = toposort(&*graph, None).unwrap();
     for v in vertices {
         let mut edges = Vec::new();
@@ -285,9 +283,6 @@ type CMMethod =
     fn(&StableDiGraph<Vertex, Edge>, NodeIndex, bool, &HashMap<NodeIndex, usize>) -> f64;
 
 fn init_order(graph: &StableDiGraph<Vertex, Edge>) -> Order {
-    info!(target: "crossing_reduction", 
-        "Initializing order of vertices in each rank via dfs.");
-
     fn dfs(
         v: NodeIndex,
         order: &mut Vec<Vec<NodeIndex>>,
@@ -325,7 +320,6 @@ fn reduce_crossings_bilayer_sweep(
     cm_method: CMMethod,
     transpose: bool,
 ) -> Order {
-    info!(target: "crossing_reduction", "Reducing crossings via bilayer sweep");
     let mut best_crossings = order.crossings(graph);
     debug!(target: "crossing_reduction", "Initial number of crossings: {best_crossings}");
     let mut last_best = 0;
@@ -346,7 +340,6 @@ fn reduce_crossings_bilayer_sweep(
             last_best += 1;
         }
         if last_best == 4 {
-            info!(target: "crossing_reduction", "Didn't improve after 4 sweeps, returning");
             return best;
         }
     }

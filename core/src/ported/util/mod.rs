@@ -1,12 +1,11 @@
 use std::collections::HashSet;
 
-use log::{debug, info};
+use log::debug;
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 
 pub fn weakly_connected_components<V: Copy, E: Copy>(
     graph: StableDiGraph<V, E>,
 ) -> Vec<StableDiGraph<V, E>> {
-    info!(target: "connected_components", "Splitting graph into its connected components");
     let mut components = Vec::new();
     let mut visited = HashSet::new();
 

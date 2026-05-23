@@ -1,4 +1,4 @@
-use log::{debug, info};
+use log::debug;
 use petgraph::{
     algo::{greedy_feedback_arc_set, is_cyclic_directed},
     stable_graph::{EdgeIndex, StableDiGraph},
@@ -13,11 +13,8 @@ use super::{Edge, Vertex};
 /// Is not guaranteed to find the minimum fas.
 pub(crate) fn remove_cycles(graph: &mut StableDiGraph<Vertex, Edge>) -> Vec<EdgeIndex> {
     if !is_cyclic_directed(&*graph) {
-        info!(target: "Cycle Removal", "Graph contains no cycle");
         return Vec::new();
     }
-
-    info!(target: "Cycle Removal", "Graph contains cycle, reversing edges");
 
     // get the feedback arc set
     let fas: Vec<EdgeIndex> = greedy_feedback_arc_set(&*graph).map(|e| e.id()).collect();

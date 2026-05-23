@@ -1,6 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 
-use log::{debug, info, trace};
+use log::{debug, trace};
 use petgraph::{
     stable_graph::{EdgeIndex, NodeIndex, StableDiGraph},
     Direction::{self, Incoming, Outgoing},
@@ -22,11 +22,9 @@ pub(crate) fn print_ranks(graph: &StableDiGraph<Vertex, Edge>) {
 /// Builds a feasible tree, which means a tree in which each edge has a
 /// minimum amount of slack (edge length = minimum length)
 pub(super) fn feasible_tree(graph: &mut StableDiGraph<Vertex, Edge>, minimum_length: i32) {
-    info!(target: "ranking", "building feasible tree");
     let tree_root = graph.node_indices().next().unwrap();
     trace!(target: "ranking", "root of tree is: {}", tree_root.index());
 
-    info!(target: "ranking", "Trying to build tight tree.");
     while tight_tree(graph, tree_root, &mut HashSet::new(), minimum_length) < graph.node_count() {
         debug!(target: "ranking", "unable to build tight tree yet, finding edge which is not tight");
         let edge = find_non_tight_edge(graph, minimum_length);
@@ -47,7 +45,6 @@ pub(super) fn feasible_tree(graph: &mut StableDiGraph<Vertex, Edge>, minimum_len
 
 pub(super) fn move_vertices_up(graph: &mut StableDiGraph<Vertex, Edge>, minimum_length: i32) {
     // set rank of all vertices to the max rank + 1 of all the upper neighbors
-    info!(target: "ranking", "Moving vertices as far up as possible");
     for v in graph.node_indices().collect::<Vec<_>>() {
         let rank = graph
             .neighbors_directed(v, Incoming)
@@ -61,7 +58,6 @@ pub(super) fn move_vertices_up(graph: &mut StableDiGraph<Vertex, Edge>, minimum_
 }
 
 pub(super) fn move_vertices_down(graph: &mut StableDiGraph<Vertex, Edge>, minimum_length: i32) {
-    info!(target: "ranking", "Moving vertices as far down as possible");
     if let Some(max_rank) = graph.node_weights().map(|w| w.rank).max() {
         for v in graph.node_indices().collect::<Vec<_>>() {
             let rank = graph
@@ -77,7 +73,6 @@ pub(super) fn move_vertices_down(graph: &mut StableDiGraph<Vertex, Edge>, minimu
 }
 
 pub(super) fn update_ranks(graph: &mut StableDiGraph<Vertex, Edge>, minimum_length: i32) {
-    info!(target: "ranking", "Updating node ranks");
     let node = graph.node_indices().next().unwrap();
     let mut visited = HashSet::from([node]);
     graph[node].rank = 0;
@@ -146,7 +141,6 @@ pub(crate) fn init_rank(graph: &mut StableDiGraph<Vertex, Edge>, minimum_length:
     // Sort nodes topologically so we don't need to verify that we've assigned
     // a rank to all incoming neighbors
     // assume graphs contain no circles for now
-    info!(target: "ranking", "Initializing ranks via topological sort.");
     for v in petgraph::algo::toposort(&*graph, None).unwrap() {
         let rank = graph
             .neighbors_directed(v, Incoming)

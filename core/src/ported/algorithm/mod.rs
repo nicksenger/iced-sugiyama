@@ -18,7 +18,7 @@
 //! and references used.
 use std::collections::{BTreeMap, HashMap};
 
-use log::{debug, info};
+use log::debug;
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 
 use crate::configure::{Config, CrossingMinimization, RankingType};
@@ -112,7 +112,6 @@ pub(crate) fn start(mut graph: StableDiGraph<Vertex, Edge>, config: &Config) -> 
 }
 
 fn init_graph(graph: &mut StableDiGraph<Vertex, Edge>) {
-    info!("Initializing graphs vertex weights");
     for id in graph.node_indices().collect::<Vec<_>>() {
         graph[id].id = id.index();
         graph[id].root = id;
@@ -122,9 +121,6 @@ fn init_graph(graph: &mut StableDiGraph<Vertex, Edge>) {
 }
 
 fn build_layout(mut graph: StableDiGraph<Vertex, Edge>, config: &Config) -> Layout {
-    info!(target: "layouting", "Start building layout");
-    info!(target: "layouting", "Configuration is: {:?}", config);
-
     // Treat the vertex spacing as just additional padding in each node. Each node will then take
     // 50% of the "responsibility" of the vertex spacing. This does however mean that dummy vertices
     // will have a gap of 50% of the vertex spacing between them and the next and previous vertex.
@@ -163,7 +159,6 @@ fn build_layout(mut graph: StableDiGraph<Vertex, Edge>, config: &Config) -> Layo
 }
 
 fn execute_phase_0(graph: &mut StableDiGraph<Vertex, Edge>) -> Vec<EdgeIndex> {
-    info!(target: "layouting", "Executing phase 0: Cycle Removal");
     p0::remove_cycles(graph)
 }
 
@@ -173,7 +168,6 @@ fn execute_phase_1(
     minimum_length: i32,
     ranking_type: RankingType,
 ) {
-    info!(target: "layouting", "Executing phase 1: Ranking");
     p1::rank(graph, minimum_length, ranking_type);
 }
 
@@ -186,14 +180,6 @@ fn execute_phase_2(
     crossing_minimization: CrossingMinimization,
     transpose: bool,
 ) -> Vec<Vec<NodeIndex>> {
-    info!(target: "layouting", "Executing phase 2: Crossing Reduction");
-    info!(target: "layouting",
-        "dummy vertex size: {:?}, heuristic for crossing minimization: {:?}, using transpose: {}",
-        dummy_size,
-        crossing_minimization,
-        transpose
-    );
-
     p2::insert_dummy_vertices(graph, minimum_length, dummy_size.unwrap_or(0.0));
     let mut order = p2::ordering(graph, crossing_minimization, transpose);
     if dummy_size.is_none() {
@@ -207,7 +193,6 @@ fn execute_phase_3(
     graph: &mut StableDiGraph<Vertex, Edge>,
     mut layers: Vec<Vec<NodeIndex>>,
 ) -> Layout {
-    info!(target: "layouting", "Executing phase 3: Coordinate Calculation");
     for n in graph.node_indices().collect::<Vec<_>>() {
         if graph[n].is_dummy {
             graph[n].id = n.index();

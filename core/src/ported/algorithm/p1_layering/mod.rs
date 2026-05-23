@@ -15,7 +15,6 @@ pub(super) mod ranking;
 #[cfg(any())]
 pub(crate) mod tests;
 
-use log::info;
 use petgraph::stable_graph::{EdgeIndex, StableDiGraph};
 use petgraph::visit::IntoNodeIdentifiers;
 
@@ -32,7 +31,6 @@ pub(super) fn rank(
     minimum_length: i32,
     ranking_type: RankingType,
 ) {
-    info!(target: "ranking", "Start ranking, ranking type: {ranking_type:?}, minimum_length: {minimum_length}");
     init_rank(graph, minimum_length);
     match ranking_type {
         RankingType::Original => original(graph, minimum_length),

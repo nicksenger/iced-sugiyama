@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use log::{debug, info, trace};
+use log::{debug, trace};
 use petgraph::{
     stable_graph::{EdgeIndex, NodeIndex, StableDiGraph},
     visit::EdgeRef,
@@ -19,7 +19,6 @@ struct NeighborhoodInfo {
 
 pub(super) fn init_cutvalues(graph: &mut StableDiGraph<Vertex, Edge>) {
     // TODO: check if it is faster to collect tree edges or to do unecessary iterations
-    info!(target: "cut_values", "Initializing cut values");
     let queue = leaves(graph);
     debug!(target: "cut_values", "Leaves of tree: {:?}", queue);
     // traverse tree inward via breadth first starting from leaves
@@ -31,7 +30,6 @@ pub(super) fn update_cutvalues(
     removed_edge: EdgeIndex,
     swap_edge: EdgeIndex,
 ) -> NodeIndex {
-    info!(target: "cut_values", "Updating outdated cut values");
     let least_common_ancestor = remove_outdated_cut_values(graph, swap_edge, removed_edge);
     let queue = VecDeque::from([graph.edge_endpoints(removed_edge).unwrap().0]);
     debug!(target: "cut_values", "Leaves of tree: {queue:?}");
@@ -53,7 +51,6 @@ fn leaves(graph: &StableDiGraph<Vertex, Edge>) -> VecDeque<NodeIndex> {
 }
 
 fn calculate_cut_values(graph: &mut StableDiGraph<Vertex, Edge>, mut queue: VecDeque<NodeIndex>) {
-    info!(target: "cut_values", "Calculating cut values of tree edges");
     while let Some(vertex) = queue.pop_front() {
         debug!(target: "cut_values", "Calculating cut values for tree edges incident to: {}", vertex.index());
         let incoming = get_neighborhood_info(graph, vertex, Incoming);
@@ -141,7 +138,6 @@ fn remove_outdated_cut_values(
     swap_edge: EdgeIndex,
     removed_edge: EdgeIndex,
 ) -> NodeIndex {
-    info!(target: "cut_values", "Remove outtdated cut_values, in order to calculate new ones");
     graph[removed_edge].cut_value = None;
     let (mut w, mut x) = graph.edge_endpoints(swap_edge).unwrap();
     if graph[w].lim > graph[x].lim {

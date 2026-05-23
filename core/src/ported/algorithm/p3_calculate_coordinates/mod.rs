@@ -3,7 +3,6 @@ mod tests;
 
 use std::collections::HashMap;
 
-use log::info;
 use petgraph::stable_graph::{NodeIndex, StableDiGraph};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction::Incoming;
@@ -14,18 +13,12 @@ pub(super) fn create_layouts(
     graph: &mut StableDiGraph<Vertex, Edge>,
     layers: &mut [Vec<NodeIndex>],
 ) -> Vec<HashMap<NodeIndex, f64>> {
-    info!(target: "coordinate_calculation", "Creating individual layouts for coordinate calculation");
     let mut layouts = Vec::new();
     mark_type_1_conflicts(graph, layers);
     // calculate the coordinates for each direction
     for _v_dir in [VDir::Down, VDir::Up] {
         for h_dir in [HDir::Right, HDir::Left] {
             // reset root, align and sink values
-            info!(target: "coordinate_calculation",
-                "creating layouts for vertical direction: {:?}, horizontal direction {:?}", 
-                _v_dir, 
-                h_dir);
-
             reset_alignment(graph, layers);
             create_vertical_alignments(graph, layers);
             let mut layout = do_horizontal_compaction(graph, layers);
@@ -51,7 +44,6 @@ pub(super) fn create_layouts(
 }
 
 pub(crate) fn align_to_smallest_width_layout(aligned_layouts: &mut [HashMap<NodeIndex, f64>]) {
-    info!(target: "coordinate_calculation", "Aligning all layouts to the one with the smallest width");
     // determine minimum and maximum coordinate of each layout, plus the width
     let min_max: Vec<(f64, f64, f64)> = aligned_layouts
         .iter()
@@ -88,8 +80,6 @@ pub(crate) fn align_to_smallest_width_layout(aligned_layouts: &mut [HashMap<Node
 pub(crate) fn calculate_relative_coords(
     aligned_layouts: Vec<HashMap<NodeIndex, f64>>,
 ) -> Vec<(NodeIndex, f64)> {
-    info!(target: "coordinate_calculation", 
-        "Calculate relative coordinates, by taking average between two medians of absolute x-coordinates for each layout direction");
     // sort all 4 coordinates per vertex in ascending order
     for l in &aligned_layouts {
         let mut v = l.iter().collect::<Vec<_>>();
@@ -138,9 +128,6 @@ fn get_inner_segment_upper_neighbor(
 }
 
 fn mark_type_1_conflicts(graph: &mut StableDiGraph<Vertex, Edge>, layers: &[Vec<NodeIndex>]) {
-    info!(target: "coordinate_calculation", 
-        "Marking type one conflicts (edge crossings between dummy vertices and non dummy vertices)");
-
     for (level, next_level) in layers[..layers.len() - 1].iter().zip(layers[1..].iter()) {
         let mut left_dummy_index = 0;
         let mut l = 0;
@@ -197,7 +184,6 @@ fn create_vertical_alignments(
     graph: &mut StableDiGraph<Vertex, Edge>,
     layers: &mut [Vec<NodeIndex>],
 ) {
-    info!(target: "coordinate_calculation", "Creating vertical alignments");
     for layer in layers {
         let mut r = -1;
 
@@ -240,12 +226,10 @@ fn do_horizontal_compaction(
     graph: &mut StableDiGraph<Vertex, Edge>,
     layers: &[Vec<NodeIndex>],
 ) -> HashMap<NodeIndex, f64> {
-    info!(target: "coordinate_calculation", "calculating coordinates for layout.");
     compute_block_max_vertex_widths(graph);
 
     let mut x_coordinates = place_blocks(graph, layers);
     // calculate class shifts
-    info!(target: "coordinate_calculation", "move blocks as close together as possible");
     for i in 0..layers.len() {
         let mut v = layers[i][0];
         if graph[v].sink == v {
@@ -330,7 +314,6 @@ fn place_blocks(
     graph: &mut StableDiGraph<Vertex, Edge>,
     layers: &[Vec<NodeIndex>],
 ) -> HashMap<NodeIndex, f64> {
-    info!(target: "coordinate_calculation", "Placing vertices in blocks.");
     let mut x_coordinates = HashMap::new();
     // place blocks
     for root in graph

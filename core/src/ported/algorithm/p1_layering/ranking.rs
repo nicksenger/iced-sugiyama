@@ -1,6 +1,5 @@
 use std::collections::{HashSet, VecDeque};
 
-use log::debug;
 use petgraph::{
     stable_graph::{EdgeIndex, NodeIndex, StableDiGraph},
     Direction::{self, Incoming, Outgoing},
@@ -25,10 +24,8 @@ pub(super) fn feasible_tree(graph: &mut StableDiGraph<Vertex, Edge>, minimum_len
     let tree_root = graph.node_indices().next().unwrap();
 
     while tight_tree(graph, tree_root, &mut HashSet::new(), minimum_length) < graph.node_count() {
-        debug!(target: "ranking", "unable to build tight tree yet, finding edge which is not tight");
         let edge = find_non_tight_edge(graph, minimum_length);
-        let (tail, head) = graph.edge_endpoints(edge).unwrap();
-        debug!(target: "ranking", "found edge: ({}, {})", tail.index(), head.index());
+        let (_, head) = graph.edge_endpoints(edge).unwrap();
         let mut delta = slack(graph, edge, minimum_length);
 
         if graph[head].is_tree_vertex {

@@ -1,4 +1,3 @@
-use log::debug;
 use petgraph::{
     algo::{greedy_feedback_arc_set, is_cyclic_directed},
     stable_graph::{EdgeIndex, StableDiGraph},
@@ -34,8 +33,6 @@ pub(crate) fn remove_cycles(graph: &mut StableDiGraph<Vertex, Edge>) -> Vec<Edge
     }
 
     assert!(!is_cyclic_directed(&*graph));
-
-    debug!(target: "Cycle Removal", "Reversed {} edges", reversed_edges.len());
 
     reversed_edges
 }

@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 
-use log::debug;
 use petgraph::{
     stable_graph::{EdgeIndex, NodeIndex, StableDiGraph},
     visit::EdgeRef,
@@ -20,7 +19,6 @@ struct NeighborhoodInfo {
 pub(super) fn init_cutvalues(graph: &mut StableDiGraph<Vertex, Edge>) {
     // TODO: check if it is faster to collect tree edges or to do unecessary iterations
     let queue = leaves(graph);
-    debug!(target: "cut_values", "Leaves of tree: {:?}", queue);
     // traverse tree inward via breadth first starting from leaves
     calculate_cut_values(graph, queue);
 }
@@ -32,7 +30,6 @@ pub(super) fn update_cutvalues(
 ) -> NodeIndex {
     let least_common_ancestor = remove_outdated_cut_values(graph, swap_edge, removed_edge);
     let queue = VecDeque::from([graph.edge_endpoints(removed_edge).unwrap().0]);
-    debug!(target: "cut_values", "Leaves of tree: {queue:?}");
     calculate_cut_values(graph, queue);
     least_common_ancestor
 }
@@ -52,7 +49,6 @@ fn leaves(graph: &StableDiGraph<Vertex, Edge>) -> VecDeque<NodeIndex> {
 
 fn calculate_cut_values(graph: &mut StableDiGraph<Vertex, Edge>, mut queue: VecDeque<NodeIndex>) {
     while let Some(vertex) = queue.pop_front() {
-        debug!(target: "cut_values", "Calculating cut values for tree edges incident to: {}", vertex.index());
         let incoming = get_neighborhood_info(graph, vertex, Incoming);
         let outgoing = get_neighborhood_info(graph, vertex, Outgoing);
 
@@ -141,10 +137,6 @@ fn remove_outdated_cut_values(
     if graph[w].lim > graph[x].lim {
         std::mem::swap(&mut w, &mut x)
     }
-    debug!(target: "cut_values", 
-        "looking for path connecting endpoints of new edge ({}, {}), removing cut values on the way", 
-        w.index(), 
-        x.index());
 
     // follow path back until least common ancestor is found
     // and remove cut_values on the way
@@ -175,12 +167,6 @@ fn remove_outdated_cut_values(
         graph[edge].cut_value = None;
         l = parent;
     }
-
-    debug!(target: "cut_values", 
-        "found least common ancestor in path connecting {} {}: {}", 
-        w.index(), 
-        x.index(), 
-        least_common_ancestor.index());
 
     least_common_ancestor
 }

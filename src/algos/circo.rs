@@ -503,15 +503,17 @@ fn layout_block(block: &mut Block, state: &CircState) {
 
     reduce_crossings(&mut path, &block.edges);
 
+    // Account for node sizes: radius = N * (min_dist + largest_node) / (2 * PI)
+    let largest_node = 72.0; // default node size from the moar example (MIN_NODE_SIDE)
     let radius = if path.len() <= 1 {
         0.0
     } else {
-        let circumference = path.len() as f64 * state.min_dist;
+        let circumference = path.len() as f64 * (state.min_dist + largest_node);
         circumference / TAU
     };
 
     block.circle_list = path;
-    block.radius = if n <= 1 { state.min_dist / 2.0 } else { radius };
+    block.radius = if n <= 1 { (state.min_dist + largest_node) / 2.0 } else { radius };
     block.rad0 = block.radius;
     block.parent_pos = None;
 }
@@ -620,6 +622,7 @@ fn collect_positions(
     rotation: f64,
     coords: &mut std::collections::BTreeMap<usize, (f64, f64)>,
     all_nodes: &[u32],
+    min_dist: f64,
 ) {
     let n = block.circle_list.len();
     if n == 0 {
@@ -645,7 +648,7 @@ fn collect_positions(
     }
 
     for child in &block.children {
-        let child_radius: f64 = block.radius + child.radius + 40.0;
+        let child_radius: f64 = block.radius + child.radius + min_dist;
         let child_theta: f64 = 0.0;
         let child_x = child_radius * child_theta.cos();
         let child_y = child_radius * child_theta.sin();
@@ -653,7 +656,7 @@ fn collect_positions(
         let cx = child_x * cos_r - child_y * sin_r + offset_x;
         let cy = child_x * sin_r + child_y * cos_r + offset_y;
 
-        collect_positions(child, cx, cy, rotation, coords, all_nodes);
+        collect_positions(child, cx, cy, rotation, coords, all_nodes, min_dist);
     }
 }
 
@@ -687,7 +690,7 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
         }
     }
 
-    let state = CircState { min_dist: 40.0 };
+    let state = CircState { min_dist: 120.0 };
 
     let mut root = match build_block_tree(&adj) {
         Some(r) => r,
@@ -699,7 +702,7 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
     do_block(&mut root, &state);
 
     let mut coords: std::collections::BTreeMap<usize, (f64, f64)> = std::collections::BTreeMap::new();
-    collect_positions(&root, 0.0, 0.0, 0.0, &mut coords, nodes);
+    collect_positions(&root, 0.0, 0.0, 0.0, &mut coords, nodes, state.min_dist);
 
     let max_x = coords.values().map(|(x, _)| *x).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(0.0);
     let max_y = coords.values().map(|(_, y)| *y).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(0.0);

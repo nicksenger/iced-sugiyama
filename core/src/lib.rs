@@ -285,6 +285,22 @@ pub struct EdgeLayout {
 }
 
 impl EdgeLayout {
+    pub fn new(
+        index: usize,
+        points: Vec<(f64, f64)>,
+        curve_points: Vec<(f64, f64)>,
+        label: Option<String>,
+        label_position: Option<(f64, f64)>,
+    ) -> Self {
+        Self {
+            index,
+            points,
+            curve_points,
+            label,
+            label_position,
+        }
+    }
+
     pub fn index(&self) -> usize {
         self.index
     }
@@ -317,6 +333,24 @@ pub struct ClusterLayout {
 }
 
 impl ClusterLayout {
+    pub fn new(
+        index: usize,
+        parent: Option<usize>,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+    ) -> Self {
+        Self {
+            index,
+            parent,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        }
+    }
+
     pub fn index(&self) -> usize {
         self.index
     }
@@ -352,6 +386,22 @@ pub struct GraphLayout {
 }
 
 impl GraphLayout {
+    pub fn from_parts(
+        max_x: f64,
+        max_y: f64,
+        coords: BTreeMap<usize, (f64, f64)>,
+        edges: Vec<EdgeLayout>,
+        clusters: Vec<ClusterLayout>,
+    ) -> Self {
+        Self {
+            max_x,
+            max_y,
+            coords,
+            edges,
+            clusters,
+        }
+    }
+
     fn empty() -> Self {
         Self {
             max_x: 0.0,

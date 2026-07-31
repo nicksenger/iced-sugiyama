@@ -17,6 +17,8 @@ use iced::{
 };
 use iced::{Point, Rectangle, Vector};
 use iced_sugiyama::{Cluster, EdgeEndpointKind, Graph, Sugiyama};
+#[cfg(feature = "circo")]
+use iced_sugiyama::circo_layout;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -572,7 +574,7 @@ impl Moarificator {
         let clusters = build_clusters(&self.graph, self.cluster_seed, self.cluster_count);
 
         let graph = Container::new({
-            let graph = Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.graph, |n| {
+            let sugiyama = Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.graph, |n| {
                 button(
                     container(text(node_label(n)).font(GRAPH_FONT))
                         .width(Length::Fill)
@@ -610,10 +612,16 @@ impl Moarificator {
             })
             .node_size(node_size)
             .edge_corner_radius(8.0)
-            .edge_endpoint_extension(0.0)
-            .clusters(clusters)
-            .render_config(render_config())
-            .cluster_container(|idx, cluster| {
+            .edge_endpoint_extension(0.0);
+
+            #[cfg(feature = "circo")]
+            let sugiyama = sugiyama.layout_fn(circo_layout);
+
+            #[cfg(not(feature = "circo"))]
+            let sugiyama = sugiyama.clusters(clusters).render_config(render_config());
+
+            #[cfg(not(feature = "circo"))]
+            let sugiyama = sugiyama.cluster_container(|idx, cluster| {
                 let border_color = cluster_border_color_for_state(
                     *self
                         .cluster_border_states
@@ -639,9 +647,12 @@ impl Moarificator {
                     .style(move |_| cluster_container_style(border_color))
                     .into(),
                 )
-            })
-            .cluster_color(|_| Color::TRANSPARENT)
-            .padding(70);
+            });
+
+            #[cfg(not(feature = "circo"))]
+            let sugiyama = sugiyama.cluster_color(|_| Color::TRANSPARENT);
+
+            let sugiyama = sugiyama.padding(70);
 
             let graph = {
                 let animation_duration = if self.export_in_progress || self.headless {
@@ -649,7 +660,7 @@ impl Moarificator {
                 } else {
                     Duration::from_millis(400)
                 };
-                graph.animation_duration(animation_duration)
+                sugiyama.animation_duration(animation_duration)
             };
 
             graph
@@ -785,7 +796,11 @@ fn close_latest_window() -> Task<Message> {
 }
 
 fn run_graphviz(dot: &str, format: &'static str) -> Result<Vec<u8>, GraphvizOutputError> {
-    let mut child = Command::new("dot")
+    #[cfg(not(feature = "circo"))]
+    let cmd = "dot";
+    #[cfg(feature = "circo")]
+    let cmd = "circo";
+    let mut child = Command::new(cmd)
         .arg(format!("-T{format}"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

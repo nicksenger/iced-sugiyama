@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-pub(crate) use rust_sugiyama::{ClusterLayout, EdgeLayout, GraphLayout};
+pub use rust_sugiyama::{ClusterLayout, EdgeLayout, GraphLayout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeEndpointKind {

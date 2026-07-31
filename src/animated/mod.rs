@@ -6,6 +6,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use iced::advanced::widget;
@@ -17,7 +18,7 @@ use iced::window::RedrawRequest;
 use iced::{Color, Element, Length, Padding, Point, Size, Task, Transformation, Vector, event};
 
 pub use crate::layout_engine::{Cluster, EdgeEndpoint, EdgeEndpointKind};
-use crate::layout_engine::{GraphLayout, compute_layout};
+use crate::layout_engine::{default_layout, GraphLayout, LayoutInput};
 use crate::motion::easing::Easing;
 
 pub mod motion;
@@ -446,7 +447,7 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
     edge_endpoint_extension: f32,
     edge_color: Box<dyn Fn(EdgeRenderContext) -> (Color, Color) + 'a>,
     outgoing_edge_style: Box<dyn Fn(EdgeRenderContext) -> OutgoingEdgeStyle + 'a>,
-    edge_label: Box<dyn Fn(usize, (u32, u32)) -> Option<String> + 'a>,
+    edge_label: Arc<dyn Fn(usize, (u32, u32)) -> Option<String> + 'a>,
     edge_label_element: Box<
         dyn Fn(
                 usize,
@@ -464,7 +465,7 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
             ) -> Option<Element<'static, Message, Theme, Renderer>>
             + 'a,
     >,
-    node_size: Box<dyn Fn(u32) -> (f64, f64) + 'a>,
+    node_size: Arc<dyn Fn(u32) -> (f64, f64) + 'a>,
     clusters: Vec<Cluster>,
     render_config: rust_sugiyama::RenderConfig,
     cluster_color: fn(usize) -> Color,
@@ -475,6 +476,7 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
     auto_fit: AutoFit,
     keep_centered: bool,
     on_viewport_interaction: Option<Box<dyn Fn(ViewportInteraction) -> Message + 'a>>,
+    layout_fn: Box<dyn Fn(&LayoutInput<'_>) -> GraphLayout + 'a>,
 }
 
 impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
@@ -492,10 +494,10 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
             edge_endpoint_extension: 0.0,
             edge_color: Box::new(|_| (Color::BLACK, Color::BLACK.scale_alpha(0.5))),
             outgoing_edge_style: Box::new(|_| OutgoingEdgeStyle::default()),
-            edge_label: Box::new(|_, _| None),
+            edge_label: Arc::new(|_, _| None),
             edge_label_element: Box::new(|_, _, _| None),
             edge_endpoint: Box::new(|_, _, _, _| None),
-            node_size: Box::new(|_| (56.0, 32.0)),
+            node_size: Arc::new(|_| (56.0, 32.0)),
             clusters: Vec::new(),
             render_config: Default::default(),
             cluster_color: |_| Color::from_rgba8(90, 90, 90, 0.6),
@@ -506,7 +508,26 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
             auto_fit: AutoFit::Off,
             keep_centered: false,
             on_viewport_interaction: None,
+            layout_fn: Box::new(default_layout),
         }
+    }
+
+    /// Set a custom layout function.
+    ///
+    /// The default uses the Sugiyama algorithm from `iced-sugiyama-core`.
+    /// Pass a custom function to provide your own layout implementation.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Use a force-directed layout instead of Sugiyama
+    /// .layout_fn(|input| my_force_directed_layout(input))
+    /// ```
+    pub fn layout_fn(
+        mut self,
+        f: impl Fn(&LayoutInput<'_>) -> GraphLayout + 'a,
+    ) -> Self {
+        self.layout_fn = Box::new(f);
+        self
     }
 
     pub fn id(mut self, id: impl Into<Id>) -> Self {
@@ -543,7 +564,7 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     }
 
     pub fn edge_label(mut self, f: impl Fn(usize, (u32, u32)) -> Option<String> + 'a) -> Self {
-        self.edge_label = Box::new(f);
+        self.edge_label = Arc::new(f);
         self
     }
 
@@ -575,7 +596,7 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     }
 
     pub fn node_size(mut self, f: impl Fn(u32) -> (f64, f64) + 'a) -> Self {
-        self.node_size = Box::new(f);
+        self.node_size = Arc::new(f);
         self
     }
 
@@ -725,15 +746,15 @@ where
                 let sugiyama = {
                     let mut memo = layout_memo.borrow_mut();
                     memo.layout_for(signature, || {
-                        compute_layout(
-                            &graph.nodes,
-                            &graph.edges,
-                            &graph.config,
-                            &self.node_size,
-                            &self.edge_label,
-                            &self.clusters,
-                            &self.render_config,
-                        )
+                        (self.layout_fn)(&LayoutInput {
+                            nodes: Arc::from(graph.nodes.as_slice()),
+                            edges: Arc::from(graph.edges.as_slice()),
+                            config: graph.config,
+                            render_config: self.render_config,
+                            clusters: Arc::from(self.clusters.as_slice()),
+                            node_size: Arc::clone(&self.node_size),
+                            edge_label: Arc::clone(&self.edge_label),
+                        })
                     })
                 };
                 let edge_style_by_index = graph
@@ -924,15 +945,15 @@ where
         {
             let mut memo = state.layout_memo.borrow_mut();
             let _ = memo.layout_for(signature, || {
-                compute_layout(
-                    &self.graph.nodes,
-                    &self.graph.edges,
-                    &self.graph.config,
-                    &self.node_size,
-                    &self.edge_label,
-                    &self.clusters,
-                    &self.render_config,
-                )
+                (self.layout_fn)(&LayoutInput {
+                    nodes: Arc::from(self.graph.nodes.as_slice()),
+                    edges: Arc::from(self.graph.edges.as_slice()),
+                    config: self.graph.config,
+                    render_config: self.render_config,
+                    clusters: Arc::from(self.clusters.as_slice()),
+                    node_size: Arc::clone(&self.node_size),
+                    edge_label: Arc::clone(&self.edge_label),
+                })
             });
         }
         state.previous_edge_style_by_index = Some(snapshot_edge_styles(
@@ -973,15 +994,15 @@ where
             {
                 let mut memo = state.layout_memo.borrow_mut();
                 let _ = memo.layout_for(signature, || {
-                    compute_layout(
-                        &self.graph.nodes,
-                        &self.graph.edges,
-                        &self.graph.config,
-                        &self.node_size,
-                        &self.edge_label,
-                        &self.clusters,
-                        &self.render_config,
-                    )
+                    (self.layout_fn)(&LayoutInput {
+                        nodes: Arc::from(self.graph.nodes.as_slice()),
+                        edges: Arc::from(self.graph.edges.as_slice()),
+                        config: self.graph.config,
+                        render_config: self.render_config,
+                        clusters: Arc::from(self.clusters.as_slice()),
+                        node_size: Arc::clone(&self.node_size),
+                        edge_label: Arc::clone(&self.edge_label),
+                    })
                 });
             }
             state.previous_edge_style_by_index = Some(snapshot_edge_styles(

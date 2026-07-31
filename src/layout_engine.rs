@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 pub(crate) use rust_sugiyama::{ClusterLayout, EdgeLayout, GraphLayout};
 
@@ -50,6 +51,50 @@ impl Cluster {
             ..self
         }
     }
+}
+
+/// Input data for a layout computation.
+///
+/// Passed to custom layout functions provided via [`Sugiyama::layout_fn`](crate::Sugiyama::layout_fn).
+#[derive(Clone)]
+pub struct LayoutInput<'a> {
+    /// Node IDs in the graph.
+    pub nodes: Arc<[u32]>,
+    /// Edges as (source, destination) pairs.
+    pub edges: Arc<[(u32, u32)]>,
+    /// Sugiyama algorithm configuration.
+    pub config: rust_sugiyama::Config,
+    /// Render configuration (routing, clustering, etc.).
+    pub render_config: rust_sugiyama::RenderConfig,
+    /// Cluster definitions.
+    pub clusters: Arc<[Cluster]>,
+    /// Closure that returns the size of a node.
+    pub node_size: Arc<dyn Fn(u32) -> (f64, f64) + 'a>,
+    /// Closure that returns an optional label for an edge.
+    pub edge_label: Arc<dyn Fn(usize, (u32, u32)) -> Option<String> + 'a>,
+}
+
+impl<'a> LayoutInput<'a> {
+    /// Compute the layout using the default Sugiyama algorithm.
+    ///
+    /// Useful when your custom layout function delegates to the default
+    /// algorithm for some cases.
+    pub fn compute(&self) -> GraphLayout {
+        compute_layout(
+            &self.nodes,
+            &self.edges,
+            &self.config,
+            &|n| (self.node_size)(n),
+            &|i, e| (self.edge_label)(i, e),
+            &self.clusters,
+            &self.render_config,
+        )
+    }
+}
+
+/// The default layout function using the Sugiyama algorithm.
+pub fn default_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
+    input.compute()
 }
 
 fn core_clusters(clusters: &[Cluster]) -> Vec<rust_sugiyama::Cluster> {

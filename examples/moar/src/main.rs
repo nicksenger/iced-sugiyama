@@ -19,6 +19,8 @@ use iced::{Point, Rectangle, Vector};
 use iced_sugiyama::{Cluster, EdgeEndpointKind, Graph, Sugiyama};
 #[cfg(feature = "circo")]
 use iced_sugiyama::circo_layout;
+#[cfg(all(feature = "microdot", not(feature = "circo")))]
+use iced_sugiyama::microdot_layout;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -129,6 +131,13 @@ where
 }
 
 pub fn main() -> iced::Result {
+    #[cfg(all(feature = "circo", feature = "microdot"))]
+    {
+        eprintln!("error: the 'circo' and 'microdot' features are mutually exclusive; enable at most one");
+        std::process::exit(1);
+    }
+
+    #[cfg_attr(all(feature = "circo", feature = "microdot"), allow(unreachable_code))]
     let options = AppOptions::from_env();
 
     if options.headless && options.noimg {
@@ -616,6 +625,9 @@ impl Moarificator {
 
             #[cfg(feature = "circo")]
             let sugiyama = sugiyama.layout_fn(circo_layout);
+
+            #[cfg(all(feature = "microdot", not(feature = "circo")))]
+            let sugiyama = sugiyama.layout_fn(microdot_layout);
 
             #[cfg(not(feature = "circo"))]
             let sugiyama = sugiyama.clusters(clusters).render_config(render_config());

@@ -9,6 +9,7 @@ publish = false
 [features]
 default = []
 circo = ["iced-sugiyama/circo"]
+microdot = ["iced-sugiyama/microdot"]
 
 [dependencies]
 fastrand = "2"

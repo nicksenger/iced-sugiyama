@@ -7,5 +7,8 @@ pub use layout_engine::{graphviz_plain_layout, Cluster, EdgeEndpoint, EdgeEndpoi
 #[cfg(feature = "circo")]
 pub use algos::circo::circo_layout;
 
+#[cfg(feature = "microdot")]
+pub use algos::microdot::microdot_layout;
+
 mod animated;
 pub use animated::*;

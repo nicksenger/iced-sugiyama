@@ -1311,7 +1311,7 @@ where
                                     .iter()
                                     .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                     .collect::<Vec<_>>();
-                                let points = interpolate_orthogonal_polylines(
+                                let points = interpolate_polylines(
                                     &projected_old,
                                     &projected_new,
                                     progress,
@@ -2605,96 +2605,61 @@ fn extend_polyline_endpoints(points: &[Point], extension: f32) -> Vec<Point> {
     adjusted
 }
 
-fn interpolate_orthogonal_polylines(from: &[Point], to: &[Point], t: f32) -> Vec<Point> {
-    let samples = from.len().max(to.len()).max(2);
-    let from_resampled = resample_polyline(from, samples);
-    let to_resampled = resample_polyline(to, samples);
-
-    let blended = from_resampled
-        .iter()
-        .zip(to_resampled.iter())
-        .map(|(a, b)| Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
-        .collect::<Vec<_>>();
-
-    if blended.len() < 2 {
-        return blended;
-    }
-
-    let mut orthogonal = Vec::with_capacity(blended.len() * 2);
-    orthogonal.push(blended[0]);
-
-    for i in 0..blended.len().saturating_sub(1) {
-        let target = blended[i + 1];
-        let current = match orthogonal.last().copied() {
-            Some(point) => point,
-            None => target,
-        };
-
-        if point_close(current, target) {
-            continue;
-        }
-        if almost_equal_f32(current.x, target.x) || almost_equal_f32(current.y, target.y) {
-            orthogonal.push(target);
-            continue;
-        }
-
-        let from_dx = (from_resampled[i + 1].x - from_resampled[i].x).abs();
-        let from_dy = (from_resampled[i + 1].y - from_resampled[i].y).abs();
-        let to_dx = (to_resampled[i + 1].x - to_resampled[i].x).abs();
-        let to_dy = (to_resampled[i + 1].y - to_resampled[i].y).abs();
-        let horizontal_score = from_dx * (1.0 - t) + to_dx * t;
-        let vertical_score = from_dy * (1.0 - t) + to_dy * t;
-        let horizontal_first = horizontal_score >= vertical_score;
-
-        let corner = if horizontal_first {
-            Point::new(target.x, current.y)
-        } else {
-            Point::new(current.x, target.y)
-        };
-
-        if !point_close(current, corner) {
-            orthogonal.push(corner);
-        }
-        if !point_close(corner, target) {
-            orthogonal.push(target);
-        }
-    }
-
-    simplify_orthogonal_polyline(&orthogonal)
-}
-
-fn resample_polyline(points: &[Point], samples: usize) -> Vec<Point> {
-    if points.is_empty() {
+fn interpolate_polylines(from: &[Point], to: &[Point], t: f32) -> Vec<Point> {
+    if from.is_empty() || to.is_empty() {
         return Vec::new();
     }
-    if points.len() == 1 {
-        return vec![points[0]; samples];
+
+    let (from_lengths, from_total) = polyline_segment_lengths(from);
+    let (to_lengths, to_total) = polyline_segment_lengths(to);
+    let mut fractions = polyline_vertex_fractions(&from_lengths, from_total);
+    fractions.extend(polyline_vertex_fractions(&to_lengths, to_total));
+    fractions.sort_by(f32::total_cmp);
+    fractions.dedup_by(|a, b| (*a - *b).abs() <= 1e-6);
+
+    let progress = t.clamp(0.0, 1.0);
+    let blended = fractions
+        .into_iter()
+        .map(|fraction| {
+            let from_point = point_at_distance(from, &from_lengths, from_total * fraction);
+            let to_point = point_at_distance(to, &to_lengths, to_total * fraction);
+            Point::new(
+                from_point.x + (to_point.x - from_point.x) * progress,
+                from_point.y + (to_point.y - from_point.y) * progress,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    simplify_polyline(&blended)
+}
+
+fn polyline_segment_lengths(points: &[Point]) -> (Vec<f32>, f32) {
+    let lengths = points
+        .windows(2)
+        .map(|segment| {
+            let dx = segment[1].x - segment[0].x;
+            let dy = segment[1].y - segment[0].y;
+            dx.hypot(dy)
+        })
+        .collect::<Vec<_>>();
+    let total = lengths.iter().sum();
+
+    (lengths, total)
+}
+
+fn polyline_vertex_fractions(lengths: &[f32], total: f32) -> Vec<f32> {
+    if total <= f32::EPSILON {
+        return vec![0.0, 1.0];
     }
 
-    let mut lengths = Vec::with_capacity(points.len().saturating_sub(1));
-    let mut total_length = 0.0f32;
-    for segment in points.windows(2) {
-        let dx = segment[1].x - segment[0].x;
-        let dy = segment[1].y - segment[0].y;
-        let length = (dx * dx + dy * dy).sqrt();
-        lengths.push(length);
-        total_length += length;
+    let mut cumulative = 0.0;
+    let mut fractions = Vec::with_capacity(lengths.len() + 1);
+    fractions.push(0.0);
+    for length in lengths {
+        cumulative += length;
+        fractions.push((cumulative / total).clamp(0.0, 1.0));
     }
-
-    if total_length <= f32::EPSILON {
-        return vec![points[0]; samples];
-    }
-
-    let mut result = Vec::with_capacity(samples);
-    for sample in 0..samples {
-        let distance = if samples <= 1 {
-            0.0
-        } else {
-            total_length * sample as f32 / (samples as f32 - 1.0)
-        };
-        result.push(point_at_distance(points, &lengths, distance));
-    }
-    result
+    fractions
 }
 
 fn point_at_distance(points: &[Point], lengths: &[f32], mut distance: f32) -> Point {
@@ -2720,7 +2685,7 @@ fn point_at_distance(points: &[Point], lengths: &[f32], mut distance: f32) -> Po
     }
 }
 
-fn simplify_orthogonal_polyline(points: &[Point]) -> Vec<Point> {
+fn simplify_polyline(points: &[Point]) -> Vec<Point> {
     if points.is_empty() {
         return Vec::new();
     }
@@ -2741,9 +2706,12 @@ fn simplify_orthogonal_polyline(points: &[Point]) -> Vec<Point> {
             let a = simplified[len - 3];
             let b = simplified[len - 2];
             let c = simplified[len - 1];
-            let collinear_x = almost_equal_f32(a.x, b.x) && almost_equal_f32(b.x, c.x);
-            let collinear_y = almost_equal_f32(a.y, b.y) && almost_equal_f32(b.y, c.y);
-            if collinear_x || collinear_y {
+            let incoming = b - a;
+            let outgoing = c - b;
+            let length_product = incoming.x.hypot(incoming.y) * outgoing.x.hypot(outgoing.y);
+            let cross = (incoming.x * outgoing.y - incoming.y * outgoing.x).abs();
+            let continues_forward = incoming.x * outgoing.x + incoming.y * outgoing.y >= 0.0;
+            if continues_forward && cross <= length_product * 1e-3 {
                 simplified.remove(len - 2);
             } else {
                 break;
@@ -3205,7 +3173,7 @@ fn edge_endpoint_positions(
                                         )
                                     })
                                     .collect::<Vec<_>>();
-                                interpolate_orthogonal_polylines(
+                                interpolate_polylines(
                                     &projected_old,
                                     &projected_new,
                                     progress,
@@ -4208,4 +4176,56 @@ fn hash_color(hasher: &mut impl Hasher, color: Color) {
     color.g.to_bits().hash(hasher);
     color.b.to_bits().hash(hasher);
     color.a.to_bits().hash(hasher);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_point_close(actual: Point, expected: Point) {
+        assert!(
+            (actual.x - expected.x).abs() <= 1e-3 && (actual.y - expected.y).abs() <= 1e-3,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn polyline_morph_does_not_insert_orthogonal_stair_steps() {
+        let from = vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+        ];
+        let to = vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 10.0),
+            Point::new(10.0, 10.0),
+        ];
+
+        let morphed = interpolate_polylines(&from, &to, 0.5);
+
+        assert_eq!(morphed.len(), 2);
+        assert_point_close(morphed[0], Point::new(0.0, 0.0));
+        assert_point_close(morphed[1], Point::new(10.0, 10.0));
+    }
+
+    #[test]
+    fn polyline_morph_preserves_bends_at_both_ends() {
+        let from = vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 8.0),
+        ];
+        let to = vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 5.0),
+            Point::new(5.0, 5.0),
+        ];
+
+        let at_start = interpolate_polylines(&from, &to, 0.0);
+        let at_end = interpolate_polylines(&from, &to, 1.0);
+
+        assert_eq!(at_start, from);
+        assert_eq!(at_end, to);
+    }
 }

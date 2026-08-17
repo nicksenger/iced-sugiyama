@@ -51,6 +51,76 @@ impl Hash for SharedAnimation {
     }
 }
 
+#[derive(Default)]
+struct MeasuredNodeSizes {
+    sizes: HashMap<u32, (f64, f64)>,
+    revision: u64,
+    dirty: bool,
+}
+
+#[derive(Default, Clone)]
+struct SharedNodeSizes(Rc<RefCell<MeasuredNodeSizes>>);
+
+impl SharedNodeSizes {
+    fn get(&self, node: u32) -> Option<(f64, f64)> {
+        self.0.borrow().sizes.get(&node).copied()
+    }
+
+    fn revision(&self) -> u64 {
+        self.0.borrow().revision
+    }
+
+    fn record(&self, nodes: &[u32], sizes: &[Size]) {
+        let mut state = self.0.borrow_mut();
+        let next = nodes
+            .iter()
+            .copied()
+            .zip(sizes.iter().copied())
+            .map(|(node, size)| (node, (size.width as f64, size.height as f64)))
+            .collect::<HashMap<_, _>>();
+        let changed = state.sizes.len() != next.len()
+            || next.iter().any(|(node, (width, height))| {
+                state.sizes.get(node).is_none_or(|(old_width, old_height)| {
+                    (old_width - width).abs() > 1e-3 || (old_height - height).abs() > 1e-3
+                })
+            });
+
+        if changed {
+            state.sizes = next;
+            state.revision = state.revision.saturating_add(1);
+            state.dirty = true;
+        }
+    }
+
+    fn take_dirty(&self) -> bool {
+        let mut state = self.0.borrow_mut();
+        std::mem::take(&mut state.dirty)
+    }
+}
+
+fn measured_node_size<'a>(
+    configured: Arc<dyn Fn(u32) -> (f64, f64) + 'a>,
+    measured: Option<SharedNodeSizes>,
+) -> Arc<dyn Fn(u32) -> (f64, f64) + 'a> {
+    Arc::new(move |node| {
+        measured
+            .as_ref()
+            .and_then(|sizes| sizes.get(node))
+            .unwrap_or_else(|| configured(node))
+    })
+}
+
+fn signature_with_node_sizes(signature: u64, measured: Option<&SharedNodeSizes>) -> u64 {
+    let Some(revision) = measured.map(SharedNodeSizes::revision).filter(|revision| *revision > 0)
+    else {
+        return signature;
+    };
+    let mut hasher = DefaultHasher::new();
+    signature.hash(&mut hasher);
+    revision.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DragState {
     last_cursor: Point,
@@ -323,12 +393,29 @@ impl Graph {
 pub enum Event<Message> {
     Passthrough(Message),
     Viewport(ViewportInteraction),
+    #[doc(hidden)]
+    NodeSizesChanged,
     Noop,
 }
 
 impl<Message> From<ViewportInteraction> for Event<Message> {
     fn from(value: ViewportInteraction) -> Self {
         Self::Viewport(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GraphNodesEvent {
+    Viewport(ViewportInteraction),
+    NodeSizesChanged,
+}
+
+impl<Message> From<GraphNodesEvent> for Event<Message> {
+    fn from(value: GraphNodesEvent) -> Self {
+        match value {
+            GraphNodesEvent::Viewport(interaction) => Self::Viewport(interaction),
+            GraphNodesEvent::NodeSizesChanged => Self::NodeSizesChanged,
+        }
     }
 }
 
@@ -466,6 +553,7 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
             + 'a,
     >,
     node_size: Arc<dyn Fn(u32) -> (f64, f64) + 'a>,
+    measure_node_sizes: bool,
     clusters: Vec<Cluster>,
     render_config: rust_sugiyama::RenderConfig,
     cluster_color: fn(usize) -> Color,
@@ -498,6 +586,7 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
             edge_label_element: Box::new(|_, _, _| None),
             edge_endpoint: Box::new(|_, _, _, _| None),
             node_size: Arc::new(|_| (56.0, 32.0)),
+            measure_node_sizes: false,
             clusters: Vec::new(),
             render_config: Default::default(),
             cluster_color: |_| Color::from_rgba8(90, 90, 90, 0.6),
@@ -600,6 +689,15 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
         self
     }
 
+    /// Use each node element's measured bounds for graph layout.
+    ///
+    /// The configured [`node_size`](Self::node_size) is used as an initial estimate. After the
+    /// node elements are laid out, the graph is recomputed whenever their intrinsic sizes change.
+    pub fn measure_node_sizes(mut self, measure: bool) -> Self {
+        self.measure_node_sizes = measure;
+        self
+    }
+
     pub fn clusters(mut self, clusters: Vec<Cluster>) -> Self {
         self.clusters = clusters;
         self
@@ -682,6 +780,9 @@ where
     fn view(&self, state: &Self::State) -> Element<'_, Self::Event, Theme, Renderer> {
         let switch_state = state.switch_state;
         let layout_memo = state.layout_memo.clone();
+        let measured_node_sizes = self
+            .measure_node_sizes
+            .then(|| state.measured_node_sizes.clone());
         let old_sugiyama = state
             .previous_signature
             .and_then(|signature| layout_memo.borrow().get_layout(signature));
@@ -733,15 +834,22 @@ where
                 });
 
                 let old_sugiyama = old_sugiyama.clone();
+                let node_size = measured_node_size(
+                    Arc::clone(&self.node_size),
+                    measured_node_sizes.clone(),
+                );
                 let edge_transition = edge_transition_snapshot(
                     animation.get(),
                     self.motion_easing,
                     self.motion_duration,
                 );
-                let signature = crate::layout_engine::layout_signature(
-                    &graph.nodes,
-                    &graph.edges,
-                    &self.clusters,
+                let signature = signature_with_node_sizes(
+                    crate::layout_engine::layout_signature(
+                        &graph.nodes,
+                        &graph.edges,
+                        &self.clusters,
+                    ),
+                    measured_node_sizes.as_ref(),
                 );
                 let sugiyama = {
                     let mut memo = layout_memo.borrow_mut();
@@ -752,7 +860,7 @@ where
                             config: graph.config,
                             render_config: self.render_config,
                             clusters: Arc::from(self.clusters.as_slice()),
-                            node_size: Arc::clone(&self.node_size),
+                            node_size: Arc::clone(&node_size),
                             edge_label: Arc::clone(&self.edge_label),
                         })
                     })
@@ -847,7 +955,7 @@ where
                         let Some((cx, cy)) = sugiyama.position(node_index) else {
                             continue;
                         };
-                        let (width, height) = (self.node_size)(node_id);
+                        let (width, height) = node_size(node_id);
                         let node_size = Size::new(width.max(1.0) as f32, height.max(1.0) as f32);
                         let node_center = Vector::new(cx as f32, cy as f32);
                         let Some(endpoint) = edge_endpoint_metadata(
@@ -892,6 +1000,7 @@ where
                     viewport: viewport.clone(),
                     auto_fit: self.auto_fit,
                     keep_centered: self.keep_centered,
+                    measured_node_sizes: measured_node_sizes.clone(),
                 };
 
                 Switch::new(
@@ -929,6 +1038,11 @@ where
     }
 
     fn update(&mut self, state: &mut Self::State, event: Self::Event) -> Option<Message> {
+        if matches!(&event, Event::NodeSizesChanged) {
+            state.refresh_nonce = state.refresh_nonce.saturating_add(1);
+            return None;
+        }
+
         if let Event::Viewport(interaction) = event {
             return self
                 .on_viewport_interaction
@@ -937,10 +1051,17 @@ where
         }
 
         state.switch_state.flip();
-        let signature = crate::layout_engine::layout_signature(
-            &self.graph.nodes,
-            &self.graph.edges,
-            &self.clusters,
+        let measured_node_sizes = self
+            .measure_node_sizes
+            .then(|| state.measured_node_sizes.clone());
+        let node_size = measured_node_size(Arc::clone(&self.node_size), measured_node_sizes.clone());
+        let signature = signature_with_node_sizes(
+            crate::layout_engine::layout_signature(
+                &self.graph.nodes,
+                &self.graph.edges,
+                &self.clusters,
+            ),
+            measured_node_sizes.as_ref(),
         );
         {
             let mut memo = state.layout_memo.borrow_mut();
@@ -951,7 +1072,7 @@ where
                     config: self.graph.config,
                     render_config: self.render_config,
                     clusters: Arc::from(self.clusters.as_slice()),
-                    node_size: Arc::clone(&self.node_size),
+                    node_size,
                     edge_label: Arc::clone(&self.edge_label),
                 })
             });
@@ -971,6 +1092,7 @@ where
         match event {
             Event::Noop => None,
             Event::Viewport(_) => None,
+            Event::NodeSizesChanged => None,
             Event::Passthrough(message) => Some(message),
         }
     }
@@ -986,10 +1108,18 @@ where
 
         if invalidate_request.requested {
             state.switch_state.flip();
-            let signature = crate::layout_engine::layout_signature(
-                &self.graph.nodes,
-                &self.graph.edges,
-                &self.clusters,
+            let measured_node_sizes = self
+                .measure_node_sizes
+                .then(|| state.measured_node_sizes.clone());
+            let node_size =
+                measured_node_size(Arc::clone(&self.node_size), measured_node_sizes.clone());
+            let signature = signature_with_node_sizes(
+                crate::layout_engine::layout_signature(
+                    &self.graph.nodes,
+                    &self.graph.edges,
+                    &self.clusters,
+                ),
+                measured_node_sizes.as_ref(),
             );
             {
                 let mut memo = state.layout_memo.borrow_mut();
@@ -1000,7 +1130,7 @@ where
                         config: self.graph.config,
                         render_config: self.render_config,
                         clusters: Arc::from(self.clusters.as_slice()),
-                        node_size: Arc::clone(&self.node_size),
+                        node_size,
                         edge_label: Arc::clone(&self.edge_label),
                     })
                 });
@@ -1040,6 +1170,7 @@ pub struct SugiyamaState {
     previous_edge_color_by_index: Option<HashMap<usize, (Color, Color)>>,
     animation: SharedAnimation,
     viewport: SharedViewport,
+    measured_node_sizes: SharedNodeSizes,
     layout_memo: Rc<RefCell<LayoutMemo>>,
     refresh_nonce: u64,
 }
@@ -1699,6 +1830,7 @@ where
     viewport: SharedViewport,
     auto_fit: AutoFit,
     keep_centered: bool,
+    measured_node_sizes: Option<SharedNodeSizes>,
 }
 
 #[derive(Clone)]
@@ -1743,7 +1875,7 @@ impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
     for GraphNodes<Message, Theme, Renderer>
 where
     Renderer: iced::advanced::Renderer,
-    Message: From<ViewportInteraction>,
+    Message: From<GraphNodesEvent>,
 {
     fn size(&self) -> iced::Size<Length> {
         iced::Size {
@@ -1810,7 +1942,7 @@ where
         state.last_layout_signature = Some(self.graph_signature);
         state.last_layout_size = Some(size);
 
-        let node_count = self.node_map.len();
+        let node_count = self.nodes.len();
         let cluster_container_layouts = cluster_container_layouts(
             &self.sugiyama,
             self.old_sugiyama.as_ref(),
@@ -1844,6 +1976,9 @@ where
             .take(node_count)
             .map(|layout| layout.bounds().size())
             .collect::<Vec<_>>();
+        if let Some(measured_node_sizes) = &self.measured_node_sizes {
+            measured_node_sizes.record(&self.nodes, &node_sizes);
+        }
 
         let raw_child_positions = child_positions(
             &self.sugiyama,
@@ -2027,6 +2162,15 @@ where
     ) {
         let state = tree.state.downcast_mut::<GraphNodesState>();
         let animation = &state.animation;
+        if self
+            .measured_node_sizes
+            .as_ref()
+            .is_some_and(SharedNodeSizes::take_dirty)
+        {
+            shell.publish(GraphNodesEvent::NodeSizesChanged.into());
+            shell.invalidate_layout();
+            shell.request_redraw();
+        }
         if let Animation::Pending = animation.get() {
             animation.set(Animation::Active {
                 start: Instant::now(),
@@ -2062,7 +2206,9 @@ where
                         | iced::mouse::ScrollDelta::Pixels { y, .. } => *y,
                     };
                     if self.viewport.zoom_at(delta_y, position, inner_size) {
-                        shell.publish(ViewportInteraction::UserZoomed.into());
+                        shell.publish(
+                            GraphNodesEvent::Viewport(ViewportInteraction::UserZoomed).into(),
+                        );
                         shell.invalidate_layout();
                         shell.request_redraw();
                         viewport_status = event::Status::Captured;
@@ -2083,7 +2229,9 @@ where
                         shell.invalidate_layout();
                         shell.request_redraw();
                         if captured && !state.reported_pan_this_drag {
-                            shell.publish(ViewportInteraction::UserPanned.into());
+                            shell.publish(
+                                GraphNodesEvent::Viewport(ViewportInteraction::UserPanned).into(),
+                            );
                             state.reported_pan_this_drag = true;
                         }
                         if captured {
@@ -3997,7 +4145,7 @@ impl<'a, Message, Theme, Renderer> From<GraphNodes<Message, Theme, Renderer>>
     for Element<'a, Message, Theme, Renderer>
 where
     Renderer: iced::advanced::Renderer + 'a,
-    Message: Clone + From<ViewportInteraction> + 'a,
+    Message: Clone + From<GraphNodesEvent> + 'a,
     Theme: 'a,
 {
     fn from(x: GraphNodes<Message, Theme, Renderer>) -> Self {
@@ -4227,5 +4375,24 @@ mod tests {
 
         assert_eq!(at_start, from);
         assert_eq!(at_end, to);
+    }
+
+    #[test]
+    fn measured_node_sizes_only_dirty_the_layout_when_bounds_change() {
+        let measured = SharedNodeSizes::default();
+
+        measured.record(&[7], &[Size::new(120.0, 48.0)]);
+        assert_eq!(measured.get(7), Some((120.0, 48.0)));
+        assert_eq!(measured.revision(), 1);
+        assert!(measured.take_dirty());
+
+        measured.record(&[7], &[Size::new(120.0, 48.0)]);
+        assert_eq!(measured.revision(), 1);
+        assert!(!measured.take_dirty());
+
+        measured.record(&[7], &[Size::new(132.0, 48.0)]);
+        assert_eq!(measured.get(7), Some((132.0, 48.0)));
+        assert_eq!(measured.revision(), 2);
+        assert!(measured.take_dirty());
     }
 }

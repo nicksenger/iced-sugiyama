@@ -10,15 +10,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iced::advanced::widget;
-use iced::advanced::widget::{tree, Operation, Tree, Widget};
+use iced::advanced::widget::{Operation, Tree, Widget, tree};
 use iced::time::Instant;
 use iced::widget::canvas::{self, Path};
 use iced::widget::{Component, Lazy, Stack};
 use iced::window::RedrawRequest;
-use iced::{event, Color, Element, Length, Padding, Point, Size, Task, Transformation, Vector};
+use iced::{Color, Element, Length, Padding, Point, Size, Task, Transformation, Vector, event};
 
-use crate::layout_engine::{default_layout, GraphLayout, LayoutInput};
 pub use crate::layout_engine::{Cluster, EdgeEndpoint, EdgeEndpointKind};
+use crate::layout_engine::{default_layout, GraphLayout, LayoutInput};
 use crate::motion::easing::Easing;
 
 pub mod motion;
@@ -114,9 +114,7 @@ fn measured_node_size<'a>(
 }
 
 fn signature_with_node_sizes(signature: u64, measured: Option<&SharedNodeSizes>) -> u64 {
-    let Some(revision) = measured
-        .map(SharedNodeSizes::revision)
-        .filter(|revision| *revision > 0)
+    let Some(revision) = measured.map(SharedNodeSizes::revision).filter(|revision| *revision > 0)
     else {
         return signature;
     };
@@ -616,7 +614,10 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     /// // Use a force-directed layout instead of Sugiyama
     /// .layout_fn(|input| my_force_directed_layout(input))
     /// ```
-    pub fn layout_fn(mut self, f: impl Fn(&LayoutInput<'_>) -> GraphLayout + 'a) -> Self {
+    pub fn layout_fn(
+        mut self,
+        f: impl Fn(&LayoutInput<'_>) -> GraphLayout + 'a,
+    ) -> Self {
         self.layout_fn = Box::new(f);
         self
     }
@@ -662,11 +663,11 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     pub fn edge_label_element(
         mut self,
         f: impl Fn(
-                usize,
-                (u32, u32),
-                Option<&str>,
-            ) -> Option<Element<'static, Message, Theme, Renderer>>
-            + 'a,
+            usize,
+            (u32, u32),
+            Option<&str>,
+        ) -> Option<Element<'static, Message, Theme, Renderer>>
+        + 'a,
     ) -> Self {
         self.edge_label_element = Box::new(f);
         self
@@ -675,12 +676,12 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     pub fn edge_endpoint(
         mut self,
         f: impl Fn(
-                usize,
-                (u32, u32),
-                EdgeEndpointKind,
-                EdgeEndpoint,
-            ) -> Option<Element<'static, Message, Theme, Renderer>>
-            + 'a,
+            usize,
+            (u32, u32),
+            EdgeEndpointKind,
+            EdgeEndpoint,
+        ) -> Option<Element<'static, Message, Theme, Renderer>>
+        + 'a,
     ) -> Self {
         self.edge_endpoint = Box::new(f);
         self
@@ -836,8 +837,10 @@ where
                 });
 
                 let old_sugiyama = old_sugiyama.clone();
-                let node_size =
-                    measured_node_size(Arc::clone(&self.node_size), measured_node_sizes.clone());
+                let node_size = measured_node_size(
+                    Arc::clone(&self.node_size),
+                    measured_node_sizes.clone(),
+                );
                 let edge_transition = edge_transition_snapshot(
                     animation.get(),
                     self.motion_easing,
@@ -1054,8 +1057,7 @@ where
         let measured_node_sizes = self
             .measure_node_sizes
             .then(|| state.measured_node_sizes.clone());
-        let node_size =
-            measured_node_size(Arc::clone(&self.node_size), measured_node_sizes.clone());
+        let node_size = measured_node_size(Arc::clone(&self.node_size), measured_node_sizes.clone());
         let signature = signature_with_node_sizes(
             crate::layout_engine::layout_signature(
                 &self.graph.nodes,
@@ -1443,8 +1445,11 @@ where
                                     .iter()
                                     .map(|(x, y)| project(&self.sugiyama, *x, *y))
                                     .collect::<Vec<_>>();
-                                let points =
-                                    interpolate_polylines(&projected_old, &projected_new, progress);
+                                let points = interpolate_polylines(
+                                    &projected_old,
+                                    &projected_new,
+                                    progress,
+                                );
                                 let interpolated_label_position = edge_canvas_label_position(
                                     &self.edge_label_overlay_edges,
                                     edge.index(),
@@ -2200,8 +2205,8 @@ where
             iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
                 if let Some(position) = inner_cursor {
                     let delta_y = match delta {
-                        iced::mouse::ScrollDelta::Lines { y, .. } => *y,
-                        iced::mouse::ScrollDelta::Pixels { y, .. } => *y * 2.,
+                        iced::mouse::ScrollDelta::Lines { y, .. }
+                        | iced::mouse::ScrollDelta::Pixels { y, .. } => *y,
                     };
                     if self.viewport.zoom_at(delta_y, position, inner_size) {
                         shell.publish(
@@ -3319,7 +3324,11 @@ fn edge_endpoint_positions(
                                         )
                                     })
                                     .collect::<Vec<_>>();
-                                interpolate_polylines(&projected_old, &projected_new, progress)
+                                interpolate_polylines(
+                                    &projected_old,
+                                    &projected_new,
+                                    progress,
+                                )
                             }
                             (None, Some(new_edge)) => new_edge
                                 .points()

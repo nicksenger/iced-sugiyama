@@ -30,6 +30,9 @@ const FRAME_DURATION: Duration = Duration::from_millis(1000 / FRAME_RATE_HZ);
 const EDGE_FINAL_SETTLE_START: f32 = 0.82;
 const MIN_ZOOM: f32 = 0.002;
 const MAX_ZOOM: f32 = 400.0;
+/// Scroll-wheel zoom sensitivity: each unit of vertical delta multiplies the
+/// zoom by `(1 + delta * ZOOM_WHEEL_SENSITIVITY)`.
+const ZOOM_WHEEL_SENSITIVITY: f32 = 0.1;
 const DRAG_CAPTURE_THRESHOLD: f32 = 3.0;
 const INERTIA_MIN_SPEED: f32 = 20.0;
 const INERTIA_DECAY_PER_SECOND: f32 = 0.08;
@@ -212,7 +215,7 @@ impl SharedViewport {
     fn zoom_at(&self, delta_y: f32, cursor: Point, size: Size) -> bool {
         let mut state = self.0.borrow_mut();
         let old_zoom = state.zoom;
-        let factor = (1.0 + delta_y / 30.0).max(0.01);
+        let factor = (1.0 + delta_y * ZOOM_WHEEL_SENSITIVITY).max(0.01);
         let new_zoom = (old_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
 
         if (new_zoom - old_zoom).abs() <= f32::EPSILON {

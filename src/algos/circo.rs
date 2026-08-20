@@ -23,6 +23,9 @@ struct Block {
     rad0: f64,
     /// Ordered list of nodes around the circle (indices into `nodes`).
     circle_list: Vec<usize>,
+    /// Angle in radians of each node around the circle, parallel to
+    /// `circle_list`. Gaps between neighbors vary with node size.
+    node_angles: Vec<f64>,
     /// If block has 1 node, the angle to place the parent.
     parent_pos: Option<f64>,
     /// Whether this block has been coalesced with its only child.
@@ -83,6 +86,7 @@ impl BlockFinder {
                 radius: 0.0,
                 rad0: 0.0,
                 circle_list: Vec::new(),
+                node_angles: Vec::new(),
                 parent_pos: None,
                 coalesced: false,
             });
@@ -123,6 +127,7 @@ impl BlockFinder {
                 radius: 0.0,
                 rad0: 0.0,
                 circle_list: Vec::new(),
+                node_angles: Vec::new(),
                 parent_pos: None,
                 coalesced: false,
             });
@@ -165,6 +170,7 @@ impl BlockFinder {
             radius: 0.0,
             rad0: 0.0,
             circle_list: Vec::new(),
+            node_angles: Vec::new(),
             parent_pos: None,
             coalesced: false,
         };
@@ -514,23 +520,33 @@ fn layout_block(block: &mut Block, state: &CircState) {
 
     reduce_crossings(&mut path, &block.edges);
 
-    // Account for node sizes: radius = N * (min_dist + largest_node) / (2 * PI),
-    // where largest_node is the biggest max(width, height) in this block so
-    // adjacent nodes on the circle never overlap.
-    let largest_node = block
-        .nodes
-        .iter()
-        .map(|&i| node_diameter(state.node_sizes[i]))
-        .fold(0.0, f64::max);
-    let radius = if path.len() <= 1 {
+    // Account for node sizes: each adjacent pair of nodes on the circle needs
+    // a gap of min_dist plus half of each node's extent, so the circumference
+    // is the sum of those per-pair gaps (equivalently N * min_dist + the sum
+    // of all node diameters). Sizing every gap for the largest node in the
+    // block would leave huge empty gaps around smaller nodes.
+    let path_len = path.len();
+    let diameters: Vec<f64> = path.iter().map(|&i| node_diameter(state.node_sizes[i])).collect();
+    let radius = if path_len <= 1 {
         0.0
     } else {
-        let circumference = path.len() as f64 * (state.min_dist + largest_node);
+        let circumference = (0..path_len)
+            .map(|i| state.min_dist + (diameters[i] + diameters[(i + 1) % path_len]) / 2.0)
+            .sum::<f64>();
         circumference / TAU
     };
 
+    // Convert the per-pair arc gaps into angles around the circle, starting at 0.
+    let mut node_angles = vec![0.0; path_len];
+    for i in 1..path_len {
+        let arc = state.min_dist + (diameters[i - 1] + diameters[i]) / 2.0;
+        node_angles[i] = node_angles[i - 1] + arc / radius;
+    }
+
     block.circle_list = path;
-    block.radius = if n <= 1 { (state.min_dist + largest_node) / 2.0 } else { radius };
+    block.node_angles = node_angles;
+    let own_diameter = diameters.first().copied().unwrap_or(0.0);
+    block.radius = if n <= 1 { (state.min_dist + own_diameter) / 2.0 } else { radius };
     block.rad0 = block.radius;
     block.parent_pos = None;
 }
@@ -569,7 +585,6 @@ fn position_children(block: &mut Block, state: &CircState) {
     }
 
     let length = block.circle_list.len();
-    let node_angle = if length > 0 { TAU / (length as f64) } else { TAU / child_count as f64 };
 
     let mut parent_nodes: Vec<(usize, usize)> = Vec::new();
     for (ci, child) in block.children.iter().enumerate() {
@@ -604,7 +619,11 @@ fn position_children(block: &mut Block, state: &CircState) {
     let mut max_radius: f64 = 0.0;
     for &(path_idx, ci) in &parent_nodes {
         let child = &mut block.children[ci];
-        let theta = path_idx as f64 * node_angle;
+        let theta = block
+            .node_angles
+            .get(path_idx)
+            .copied()
+            .unwrap_or(path_idx as f64 * TAU / length.max(1) as f64);
         let child_radius = child.radius;
         let r = block.radius + child_radius + state.min_dist;
         let dx = r * theta.cos();
@@ -651,7 +670,11 @@ fn collect_positions(
 
     let radius = block.radius;
     for (i, &node_local) in block.circle_list.iter().enumerate() {
-        let theta = i as f64 * TAU / n as f64;
+        let theta = block
+            .node_angles
+            .get(i)
+            .copied()
+            .unwrap_or(i as f64 * TAU / n.max(1) as f64);
         let local_x = radius * theta.cos();
         let local_y = radius * theta.sin();
 
@@ -810,9 +833,9 @@ mod tests {
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
         let layout = circo_layout(&circo_input(nodes.clone(), edges));
 
-        // radius = n * (min_dist + largest_node) / TAU with min_dist = 120 and
-        // largest_node = max(width, height) = 100 for the (100, 40) test nodes
-        // (see layout_block).
+        // radius = (n * min_dist + sum of diameters) / TAU with min_dist = 120
+        // and diameter = max(width, height) = 100 for the uniform (100, 40)
+        // test nodes (see layout_block); that equals n * (min_dist + 100) / TAU.
         let radius = 4.0 * (120.0 + 100.0) / TAU;
 
         // The reported size must be the full extent (2R plus one node size per
@@ -844,12 +867,53 @@ mod tests {
         ));
         let large = circo_layout(&circo_input_with_size(nodes, edges, (160.0, 40.0)));
 
-        // radius = n * (min_dist + largest_node) / TAU with min_dist = 120.
+        // radius = (n * min_dist + sum of diameters) / TAU with min_dist = 120,
+        // which equals n * (min_dist + d) / TAU for uniform node diameter d.
         let small_radius = 4.0 * (120.0 + 40.0) / TAU;
         let large_radius = 4.0 * (120.0 + 160.0) / TAU;
 
         assert!((small.max_x() - (2.0 * small_radius + 40.0)).abs() < 0.01);
         assert!((large.max_x() - (2.0 * large_radius + 160.0)).abs() < 0.01);
         assert!(large.max_x() > small.max_x());
+    }
+
+    #[test]
+    fn mixed_node_sizes_do_not_inflate_spacing() {
+        // One large node among small ones must not force every gap on the
+        // circle to be sized for the large node (that left huge empty gaps
+        // around the small nodes). Each adjacent pair gets a gap of min_dist
+        // plus half of each node's extent, so the circumference is
+        // N * min_dist + sum of all diameters.
+        let sizes: Vec<(f64, f64)> = vec![(160.0, 40.0), (40.0, 40.0), (40.0, 40.0), (40.0, 40.0)];
+        let nodes: Vec<u32> = (0..sizes.len() as u32).collect();
+        let edges: Vec<(u32, u32)> = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
+
+        let clusters: Arc<[crate::layout_engine::Cluster]> = Arc::from(Vec::new());
+        let input = LayoutInput {
+            nodes: Arc::from(nodes.clone()),
+            edges: Arc::from(edges),
+            config: rust_sugiyama::Config::default(),
+            render_config: rust_sugiyama::RenderConfig::default(),
+            clusters,
+            node_size: Arc::new(move |node| sizes[node as usize]),
+            edge_label: Arc::new(|_, _| None),
+        };
+        let layout = circo_layout(&input);
+
+        // Per-pair gaps (min_dist plus half of each node's diameter): the
+        // 160-wide node contributes (120 + 100) on each side and the three
+        // small nodes contribute (120 + 40) each: 220 + 160 + 160 + 220 = 760
+        // of circumference.
+        let radius = 760.0 / TAU;
+
+        // The width is 2R plus the half-widths of the leftmost and rightmost
+        // nodes on the circle (the 40-wide node at angle PI and the 160-wide
+        // node at angle 0).
+        let max_x = layout.max_x();
+        assert!((max_x - (2.0 * radius + 20.0 + 80.0)).abs() < 0.01);
+
+        // Sizing every gap for the largest node would give a much wider
+        // layout: 2 * 4 * (120 + 160) / TAU plus extents >= 396.5.
+        assert!(max_x < 396.5);
     }
 }

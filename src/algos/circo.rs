@@ -941,6 +941,19 @@ mod multi_block_tests {
     }
 
     #[test]
+    fn cycle_with_tail_and_branch_lays_out_cleanly() {
+        // The shape of a merged beam sun: a biconnected core with a chained
+        // tail and a single-node branch off the core.
+        let nodes = vec![0u32, 1, 2, 3, 4, 5, 6];
+        let edges = vec![(0u32, 1), (1, 2), (2, 3), (3, 0), (3, 4), (4, 5), (1, 6)];
+        let count = nodes.len();
+        let layout = circo_layout(&circo_input(nodes, edges));
+
+        let positions = all_positions(&layout, count);
+        assert_distinct(&positions);
+    }
+
+    #[test]
     fn sibling_child_blocks_do_not_stack() {
         // Node 0 is an articulation point with two child blocks ({0,1} and
         // {0,2}). Regression test for `apply_delta` being a no-op: every
@@ -955,3 +968,4 @@ mod multi_block_tests {
         assert_distinct(&positions);
     }
 }
+

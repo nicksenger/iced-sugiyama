@@ -530,6 +530,12 @@ impl LayoutMemo {
 }
 
 /// An iced widget which draws a layered graph of elements
+///
+/// The node, cluster, and edge elements provided by the builder are regular
+/// iced widgets: they receive events first and may handle or capture them
+/// (e.g. a `button` inside a node). When a child captures an event, the
+/// viewport does not pan or zoom for that event; otherwise empty areas of the
+/// graph keep the usual drag-to-pan and wheel-to-zoom behavior.
 pub struct Sugiyama<'a, Message, Theme, Renderer> {
     graph: Cow<'a, Graph>,
     id: Option<widget::Id>,
@@ -2206,65 +2212,6 @@ where
                     && position.y <= inner_size.height
             });
 
-        let mut viewport_status = event::Status::Ignored;
-        let mut swallow_children = false;
-        match &event {
-            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
-                if let Some(position) = inner_cursor {
-                    let delta_y = match delta {
-                        iced::mouse::ScrollDelta::Lines { y, .. }
-                        | iced::mouse::ScrollDelta::Pixels { y, .. } => *y,
-                    };
-                    if self.viewport.zoom_at(delta_y, position, inner_size) {
-                        shell.publish(
-                            GraphNodesEvent::Viewport(ViewportInteraction::UserZoomed).into(),
-                        );
-                        shell.invalidate_layout();
-                        shell.request_redraw();
-                        viewport_status = event::Status::Captured;
-                        swallow_children = true;
-                    }
-                }
-            }
-            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
-                if let Some(position) = inner_cursor {
-                    self.viewport.begin_drag(position, Instant::now());
-                    state.reported_pan_this_drag = false;
-                }
-            }
-            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
-                if self.viewport.is_dragging() {
-                    if let Some(position) = inner_cursor {
-                        let captured = self.viewport.drag_to(position, Instant::now());
-                        shell.invalidate_layout();
-                        shell.request_redraw();
-                        if captured && !state.reported_pan_this_drag {
-                            shell.publish(
-                                GraphNodesEvent::Viewport(ViewportInteraction::UserPanned).into(),
-                            );
-                            state.reported_pan_this_drag = true;
-                        }
-                        if captured {
-                            viewport_status = event::Status::Captured;
-                        }
-                    }
-                    swallow_children = true;
-                }
-            }
-            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
-                let captured = self.viewport.end_drag(Instant::now());
-                state.reported_pan_this_drag = false;
-                if self.viewport.is_moving() {
-                    shell.request_redraw();
-                }
-                if captured {
-                    viewport_status = event::Status::Captured;
-                    swallow_children = true;
-                }
-            }
-            _ => {}
-        }
-
         if let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event {
             let (new_animation, redraw) =
                 animation.get().timed_transition(self.motion_duration, *now);
@@ -2282,9 +2229,15 @@ where
             animation.set(new_animation);
         }
 
-        let child_status = if swallow_children {
-            event::Status::Ignored
-        } else {
+        // While the viewport is panning it owns cursor movement so children
+        // don't flicker hover or press states mid-drag.
+        let swallow_children = self.viewport.is_dragging()
+            && matches!(
+                event,
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. })
+            );
+
+        if !swallow_children {
             let camera = self.viewport.get();
             let transformed_cursor =
                 transform_cursor(cursor, layout.bounds(), self.padding, camera);
@@ -2306,10 +2259,68 @@ where
                         &transformed_viewport,
                     );
                 });
-            shell.event_status()
-        };
 
-        if event::Status::merge(viewport_status, child_status) == event::Status::Captured {
+            // A child handled and captured the event (e.g. a button inside a
+            // node). Let it own the event instead of panning or zooming.
+            if shell.is_event_captured() {
+                return;
+            }
+        }
+
+        let mut viewport_status = event::Status::Ignored;
+        match &event {
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                if let Some(position) = inner_cursor {
+                    let delta_y = match delta {
+                        iced::mouse::ScrollDelta::Lines { y, .. }
+                        | iced::mouse::ScrollDelta::Pixels { y, .. } => *y,
+                    };
+                    if self.viewport.zoom_at(delta_y, position, inner_size) {
+                        shell.publish(
+                            GraphNodesEvent::Viewport(ViewportInteraction::UserZoomed).into(),
+                        );
+                        shell.invalidate_layout();
+                        shell.request_redraw();
+                        viewport_status = event::Status::Captured;
+                    }
+                }
+            }
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                if let Some(position) = inner_cursor {
+                    self.viewport.begin_drag(position, Instant::now());
+                    state.reported_pan_this_drag = false;
+                }
+            }
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
+                if self.viewport.is_dragging() && let Some(position) = inner_cursor {
+                    let captured = self.viewport.drag_to(position, Instant::now());
+                    shell.invalidate_layout();
+                    shell.request_redraw();
+                    if captured && !state.reported_pan_this_drag {
+                        shell.publish(
+                            GraphNodesEvent::Viewport(ViewportInteraction::UserPanned).into(),
+                        );
+                        state.reported_pan_this_drag = true;
+                    }
+                    if captured {
+                        viewport_status = event::Status::Captured;
+                    }
+                }
+            }
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                let captured = self.viewport.end_drag(Instant::now());
+                state.reported_pan_this_drag = false;
+                if self.viewport.is_moving() {
+                    shell.request_redraw();
+                }
+                if captured {
+                    viewport_status = event::Status::Captured;
+                }
+            }
+            _ => {}
+        }
+
+        if viewport_status == event::Status::Captured {
             shell.capture_event();
         }
     }

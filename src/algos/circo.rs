@@ -33,6 +33,17 @@ struct Block {
 struct CircState {
     /// Minimum distance between nodes.
     min_dist: f64,
+    /// Size of each node, indexed by position in the input node list.
+    node_sizes: Vec<(f64, f64)>,
+}
+
+/// The extent of a node along any direction: the larger of its width and
+/// height. Degenerate (non-finite or non-positive) dimensions are treated as
+/// zero so they can't poison the layout.
+fn node_diameter((width, height): (f64, f64)) -> f64 {
+    let width = if width.is_finite() && width > 0.0 { width } else { 0.0 };
+    let height = if height.is_finite() && height > 0.0 { height } else { 0.0 };
+    width.max(height)
 }
 
 // ── DFS state for block decomposition ────────────────────────────────────
@@ -503,8 +514,14 @@ fn layout_block(block: &mut Block, state: &CircState) {
 
     reduce_crossings(&mut path, &block.edges);
 
-    // Account for node sizes: radius = N * (min_dist + largest_node) / (2 * PI)
-    let largest_node = 72.0; // default node size from the moar example (MIN_NODE_SIDE)
+    // Account for node sizes: radius = N * (min_dist + largest_node) / (2 * PI),
+    // where largest_node is the biggest max(width, height) in this block so
+    // adjacent nodes on the circle never overlap.
+    let largest_node = block
+        .nodes
+        .iter()
+        .map(|&i| node_diameter(state.node_sizes[i]))
+        .fold(0.0, f64::max);
     let radius = if path.len() <= 1 {
         0.0
     } else {
@@ -690,7 +707,12 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
         }
     }
 
-    let state = CircState { min_dist: 120.0 };
+    let node_sizes: Vec<(f64, f64)> = nodes.iter().map(|&node| (input.node_size)(node)).collect();
+
+    let state = CircState {
+        min_dist: 120.0,
+        node_sizes,
+    };
 
     let mut root = match build_block_tree(&adj) {
         Some(r) => r,
@@ -760,6 +782,14 @@ mod tests {
     use std::sync::Arc;
 
     fn circo_input(nodes: Vec<u32>, edges: Vec<(u32, u32)>) -> LayoutInput<'static> {
+        circo_input_with_size(nodes, edges, (100.0, 40.0))
+    }
+
+    fn circo_input_with_size(
+        nodes: Vec<u32>,
+        edges: Vec<(u32, u32)>,
+        size: (f64, f64),
+    ) -> LayoutInput<'static> {
         let clusters: Arc<[crate::layout_engine::Cluster]> = Arc::from(Vec::new());
         LayoutInput {
             nodes: Arc::from(nodes),
@@ -767,7 +797,7 @@ mod tests {
             config: rust_sugiyama::Config::default(),
             render_config: rust_sugiyama::RenderConfig::default(),
             clusters,
-            node_size: Arc::new(|_| (100.0, 40.0)),
+            node_size: Arc::new(move |_| size),
             edge_label: Arc::new(|_, _| None),
         }
     }
@@ -778,11 +808,12 @@ mod tests {
         // centered at the origin, so raw coordinates span [-R, R] per axis.
         let nodes = vec![0, 1, 2, 3];
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
-        let layout = circo_layout(&circo_input(nodes, edges));
+        let layout = circo_layout(&circo_input(nodes.clone(), edges));
 
         // radius = n * (min_dist + largest_node) / TAU with min_dist = 120 and
-        // largest_node = 72 (see layout_block).
-        let radius = 4.0 * (120.0 + 72.0) / TAU;
+        // largest_node = max(width, height) = 100 for the (100, 40) test nodes
+        // (see layout_block).
+        let radius = 4.0 * (120.0 + 100.0) / TAU;
 
         // The reported size must be the full extent (2R plus one node size per
         // axis), not just the positive quadrant (R plus half a node). This is
@@ -797,5 +828,28 @@ mod tests {
             assert!(x >= -1e-9 && x <= layout.max_x() + 1e-9);
             assert!(y >= -1e-9 && y <= layout.max_y() + 1e-9);
         }
+    }
+
+    #[test]
+    fn radius_scales_with_node_size() {
+        // The circle radius must come from the actual node sizes, not a fixed
+        // constant: bigger nodes need a bigger circle to avoid overlapping.
+        let nodes = vec![0, 1, 2, 3];
+        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
+
+        let small = circo_layout(&circo_input_with_size(
+            nodes.clone(),
+            edges.clone(),
+            (40.0, 40.0),
+        ));
+        let large = circo_layout(&circo_input_with_size(nodes, edges, (160.0, 40.0)));
+
+        // radius = n * (min_dist + largest_node) / TAU with min_dist = 120.
+        let small_radius = 4.0 * (120.0 + 40.0) / TAU;
+        let large_radius = 4.0 * (120.0 + 160.0) / TAU;
+
+        assert!((small.max_x() - (2.0 * small_radius + 40.0)).abs() < 0.01);
+        assert!((large.max_x() - (2.0 * large_radius + 160.0)).abs() < 0.01);
+        assert!(large.max_x() > small.max_x());
     }
 }

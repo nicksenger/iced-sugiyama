@@ -704,8 +704,38 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
     let mut coords: std::collections::BTreeMap<usize, (f64, f64)> = std::collections::BTreeMap::new();
     collect_positions(&root, 0.0, 0.0, 0.0, &mut coords, nodes, state.min_dist);
 
-    let max_x = coords.values().map(|(x, _)| *x).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(0.0);
-    let max_y = coords.values().map(|(_, y)| *y).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(0.0);
+    if coords.is_empty() {
+        return GraphLayout::from_parts(0.0, 1.0, coords, Vec::new(), Vec::new());
+    }
+
+    // Circo places nodes on circles centered at the origin, so raw coordinates
+    // span [-R, R] in each axis. The rest of the crate expects layout
+    // coordinates to start at the origin with max_x/max_y describing the total
+    // width/height (see the default Sugiyama and microdot layouts); autofit
+    // relies on that convention. Compute the full bounds including node
+    // extents, then shift everything into the positive quadrant.
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (index, &(x, y)) in &coords {
+        let (width, height) = nodes
+            .get(*index)
+            .map(|&node| (input.node_size)(node))
+            .unwrap_or((0.0, 0.0));
+        min_x = min_x.min(x - width / 2.0);
+        max_x = max_x.max(x + width / 2.0);
+        min_y = min_y.min(y - height / 2.0);
+        max_y = max_y.max(y + height / 2.0);
+    }
+
+    for (_, (x, y)) in coords.iter_mut() {
+        *x -= min_x;
+        *y -= min_y;
+    }
+
+    let layout_width = (max_x - min_x).max(1.0);
+    let layout_height = (max_y - min_y).max(1.0);
 
     let edge_layouts: Vec<_> = edges
         .iter()
@@ -721,5 +751,51 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
 
     let cluster_layouts = Vec::new();
 
-    GraphLayout::from_parts(max_x, max_y, coords, edge_layouts, cluster_layouts)
+    GraphLayout::from_parts(layout_width, layout_height, coords, edge_layouts, cluster_layouts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn circo_input(nodes: Vec<u32>, edges: Vec<(u32, u32)>) -> LayoutInput<'static> {
+        let clusters: Arc<[crate::layout_engine::Cluster]> = Arc::from(Vec::new());
+        LayoutInput {
+            nodes: Arc::from(nodes),
+            edges: Arc::from(edges),
+            config: rust_sugiyama::Config::default(),
+            render_config: rust_sugiyama::RenderConfig::default(),
+            clusters,
+            node_size: Arc::new(|_| (100.0, 40.0)),
+            edge_label: Arc::new(|_, _| None),
+        }
+    }
+
+    #[test]
+    fn bounds_cover_full_circle_not_just_positive_quadrant() {
+        // A 4-cycle is a single biconnected component laid out on one circle
+        // centered at the origin, so raw coordinates span [-R, R] per axis.
+        let nodes = vec![0, 1, 2, 3];
+        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
+        let layout = circo_layout(&circo_input(nodes, edges));
+
+        // radius = n * (min_dist + largest_node) / TAU with min_dist = 120 and
+        // largest_node = 72 (see layout_block).
+        let radius = 4.0 * (120.0 + 72.0) / TAU;
+
+        // The reported size must be the full extent (2R plus one node size per
+        // axis), not just the positive quadrant (R plus half a node). This is
+        // what autofit uses to compute zoom/pan.
+        assert!((layout.max_x() - (2.0 * radius + 100.0)).abs() < 0.01);
+        assert!((layout.max_y() - (2.0 * radius + 40.0)).abs() < 0.01);
+
+        // All node centers must sit inside the reported box, in the positive
+        // quadrant.
+        for position in 0..nodes.len() {
+            let (x, y) = layout.position(position).expect("node has a position");
+            assert!(x >= -1e-9 && x <= layout.max_x() + 1e-9);
+            assert!(y >= -1e-9 && y <= layout.max_y() + 1e-9);
+        }
+    }
 }

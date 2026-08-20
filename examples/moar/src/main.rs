@@ -9,18 +9,18 @@ use std::time::{Duration, Instant};
 use iced::alignment::{Horizontal, Vertical};
 use iced::mouse;
 use iced::widget::canvas::{self, Path};
-use iced::widget::{Column, Container, button, container, text};
+use iced::widget::{button, container, text, Column, Container};
 use iced::window;
 use iced::window::Screenshot;
 use iced::{
-    Alignment, Background, Color, Element, Font, Length, Subscription, Task, Theme, border,
+    border, Alignment, Background, Color, Element, Font, Length, Subscription, Task, Theme,
 };
 use iced::{Point, Rectangle, Vector};
-use iced_sugiyama::{Cluster, EdgeEndpointKind, Graph, Sugiyama};
 #[cfg(feature = "circo")]
 use iced_sugiyama::circo_layout;
 #[cfg(all(feature = "microdot", not(feature = "circo")))]
 use iced_sugiyama::microdot_layout;
+use iced_sugiyama::{Cluster, EdgeEndpointKind, Graph, Sugiyama};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -133,7 +133,9 @@ where
 pub fn main() -> iced::Result {
     #[cfg(all(feature = "circo", feature = "microdot"))]
     {
-        eprintln!("error: the 'circo' and 'microdot' features are mutually exclusive; enable at most one");
+        eprintln!(
+            "error: the 'circo' and 'microdot' features are mutually exclusive; enable at most one"
+        );
         std::process::exit(1);
     }
 
@@ -583,45 +585,46 @@ impl Moarificator {
         let clusters = build_clusters(&self.graph, self.cluster_seed, self.cluster_count);
 
         let graph = Container::new({
-            let sugiyama = Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.graph, |n| {
-                button(
-                    container(text(node_label(n)).font(GRAPH_FONT))
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill),
-                )
-                .padding(0)
-                .style(transparent_button_style)
-                .on_press(Message::Moar(n))
-                .width(node_size_f32(n))
-                .height(node_size_f32(n))
-                .into()
-            })
-            .edge_color(|ctx| edge_colors(ctx.edge_index))
-            .edge_label(edge_label)
-            .label_color(|idx| edge_colors(idx).0)
-            .edge_endpoint(|idx, _, kind, endpoint| {
-                let color = edge_colors(idx).0;
-                let kind = match kind {
-                    EdgeEndpointKind::Source => GraphvizEndpointGlyphKind::OpenDot,
-                    EdgeEndpointKind::Destination => GraphvizEndpointGlyphKind::NormalArrow,
-                };
-                let glyph = GraphvizEndpointGlyph {
-                    kind,
-                    color,
-                    angle_radians: endpoint.angle_radians(),
-                };
-                Some(
-                    canvas::Canvas::new(glyph)
-                        .width(glyph.size())
-                        .height(glyph.size())
-                        .into(),
-                )
-            })
-            .node_size(node_size)
-            .edge_corner_radius(8.0)
-            .edge_endpoint_extension(0.0);
+            let sugiyama =
+                Sugiyama::<Message, iced::Theme, iced::Renderer>::new(&self.graph, |n| {
+                    button(
+                        container(text(node_label(n)).font(GRAPH_FONT))
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .center_x(Length::Fill)
+                            .center_y(Length::Fill),
+                    )
+                    .padding(0)
+                    .style(transparent_button_style)
+                    .on_press(Message::Moar(n))
+                    .width(node_size_f32(n))
+                    .height(node_size_f32(n))
+                    .into()
+                })
+                .edge_color(|ctx| edge_colors(ctx.edge_index))
+                .edge_label(edge_label)
+                .label_color(|idx| edge_colors(idx).0)
+                .edge_endpoint(|idx, _, kind, endpoint| {
+                    let color = edge_colors(idx).0;
+                    let kind = match kind {
+                        EdgeEndpointKind::Source => GraphvizEndpointGlyphKind::OpenDot,
+                        EdgeEndpointKind::Destination => GraphvizEndpointGlyphKind::NormalArrow,
+                    };
+                    let glyph = GraphvizEndpointGlyph {
+                        kind,
+                        color,
+                        angle_radians: endpoint.angle_radians(),
+                    };
+                    Some(
+                        canvas::Canvas::new(glyph)
+                            .width(glyph.size())
+                            .height(glyph.size())
+                            .into(),
+                    )
+                })
+                .node_size(node_size)
+                .edge_corner_radius(8.0)
+                .edge_endpoint_extension(0.0);
 
             #[cfg(feature = "circo")]
             let sugiyama = sugiyama.layout_fn(circo_layout);
@@ -675,7 +678,7 @@ impl Moarificator {
                 sugiyama.animation_duration(animation_duration)
             };
 
-            graph
+            graph.auto_fit(iced_sugiyama::AutoFit::Initial)
         })
         .width(Length::Fill)
         .height(Length::Fill);

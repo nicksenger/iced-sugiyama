@@ -6,8 +6,8 @@ use crate::layout_engine::{GraphLayout, LayoutInput};
 // ── Data structures ──────────────────────────────────────────────────────
 
 /// A block (biconnected component) in the block-cutpoint tree.
-#[derive(Clone)]
-struct Block {
+#[derive(Clone, Debug)]
+pub struct Block {
     /// Nodes in this block (by index into the original node list).
     nodes: Vec<usize>,
     /// Edges internal to this block as (src_idx, dst_idx) pairs.
@@ -21,12 +21,18 @@ struct Block {
     radius: f64,
     /// Radius of just this block (not including children).
     rad0: f64,
-    /// Ordered list of nodes around the circle (indices into `nodes`).
+    /// Ordered list of nodes around the circle (global indices into the
+    /// original node list).
     circle_list: Vec<usize>,
     /// If block has 1 node, the angle to place the parent.
     parent_pos: Option<f64>,
     /// Whether this block has been coalesced with its only child.
     coalesced: bool,
+    /// Translation of this block's center relative to its parent's center,
+    /// expressed in the parent's coordinate frame.
+    offset: (f64, f64),
+    /// Rotation of this block relative to its parent, in radians.
+    rotation: f64,
 }
 
 /// State for the circular layout algorithm.
@@ -42,6 +48,10 @@ struct BlockFinder {
     low: Vec<u32>,
     parent: Vec<Option<usize>>,
     block_of: Vec<Option<usize>>,
+    /// Blocks each node has already been assigned to. Articulation points
+    /// belong to every block containing them, so membership is tracked per
+    /// node instead of being claimed by the first pop.
+    pops: Vec<Vec<usize>>,
     blocks: Vec<Block>,
     edge_stack: Vec<(usize, usize)>,
     order: u32,
@@ -54,6 +64,7 @@ impl BlockFinder {
             low: vec![0; n],
             parent: vec![None; n],
             block_of: vec![None; n],
+            pops: vec![Vec::new(); n],
             blocks: Vec::new(),
             edge_stack: Vec::new(),
             order: 1,
@@ -74,6 +85,8 @@ impl BlockFinder {
                 circle_list: Vec::new(),
                 parent_pos: None,
                 coalesced: false,
+                offset: (0.0, 0.0),
+                rotation: 0.0,
             });
             self.block_of[root] = Some(idx);
         }
@@ -114,6 +127,8 @@ impl BlockFinder {
                 circle_list: Vec::new(),
                 parent_pos: None,
                 coalesced: false,
+                offset: (0.0, 0.0),
+                rotation: 0.0,
             });
             self.block_of[u] = Some(idx);
         }
@@ -128,8 +143,9 @@ impl BlockFinder {
             block_edges.push((a, b));
 
             for &node in &[a, b] {
-                if self.block_of[node].is_none() {
+                if !self.pops[node].contains(&self.blocks.len()) {
                     block_nodes.push(node);
+                    self.pops[node].push(self.blocks.len());
                 }
             }
 
@@ -156,6 +172,8 @@ impl BlockFinder {
             circle_list: Vec::new(),
             parent_pos: None,
             coalesced: false,
+            offset: (0.0, 0.0),
+            rotation: 0.0,
         };
 
         if block.nodes.len() > 1 && !block.nodes.contains(&u) {
@@ -186,6 +204,7 @@ fn build_block_tree(adj: &[Vec<usize>]) -> Option<Block> {
     let blocks = finder.blocks;
     let block_of = finder.block_of;
     let val = finder.val;
+    let pops = finder.pops;
 
     let root_block = block_of[root].unwrap_or(0);
 
@@ -196,6 +215,8 @@ fn build_block_tree(adj: &[Vec<usize>]) -> Option<Block> {
         if bi == root_block {
             continue;
         }
+        // The cutpoint connecting this block to the rest of the graph is its
+        // lowest-DFS-order node.
         let mut min_val = u32::MAX;
         let mut best_node = 0;
         for &node in &blocks[bi].nodes {
@@ -204,12 +225,15 @@ fn build_block_tree(adj: &[Vec<usize>]) -> Option<Block> {
                 best_node = node;
             }
         }
-        let parent_node = finder.parent[best_node];
-        if let Some(pn) = parent_node {
-            if let Some(pb) = block_of[pn] {
-                block_parent[bi] = Some(pb);
-                block_child_node[bi] = Some(best_node);
-            }
+        // Its parent is the latest-popped block sharing that cutpoint — the
+        // one closest to the DFS root. (Looking up the cutpoint's DFS parent
+        // instead fails when that node is itself shared by several blocks.)
+        let Some(shared) = pops.get(best_node).filter(|p| p.len() > 1) else {
+            continue;
+        };
+        if let Some(parent) = shared.iter().copied().filter(|&b| b != bi).max() {
+            block_parent[bi] = Some(parent);
+            block_child_node[bi] = Some(best_node);
         }
     }
 
@@ -241,22 +265,18 @@ fn build_block_tree(adj: &[Vec<usize>]) -> Option<Block> {
 
 // ── Spanning tree and longest path ───────────────────────────────────────
 
-fn spanning_tree(nodes: &[usize], edges: &[(usize, usize)]) -> Vec<Option<usize>> {
-    let n = nodes.len();
+/// BFS spanning tree over `n` nodes, with edges already expressed in local
+/// indices (positions within the block's node list).
+fn spanning_tree(n: usize, edges: &[(usize, usize)]) -> Vec<Option<usize>> {
     if n == 0 {
         return Vec::new();
     }
 
-    let global_to_local: HashMap<usize, usize> = nodes.iter().copied().enumerate().map(|(i, g)| (g, i)).collect();
     let mut local_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
 
     for &(a, b) in edges {
-        if let Some(&la) = global_to_local.get(&a) {
-            if let Some(&lb) = global_to_local.get(&b) {
-                local_adj[la].push(lb);
-                local_adj[lb].push(la);
-            }
-        }
+        local_adj[a].push(b);
+        local_adj[b].push(a);
     }
 
     let mut parent: Vec<Option<usize>> = vec![None; n];
@@ -342,9 +362,9 @@ fn longest_path_in_tree(parent: &[Option<usize>]) -> Vec<usize> {
 
 // ── Node placement ───────────────────────────────────────────────────────
 
-fn place_residual_nodes(block_nodes: &[usize], edges: &[(usize, usize)], path: &mut Vec<usize>) {
-    let n = block_nodes.len();
-
+/// Appends the nodes missing from `path` (local indices over `n` nodes) so
+/// that every node appears exactly once. Edges are local.
+fn place_residual_nodes(n: usize, edges: &[(usize, usize)], path: &mut Vec<usize>) {
     let mut on_path = vec![false; n];
     for &idx in path.iter() {
         if idx < n {
@@ -496,12 +516,22 @@ fn layout_block(block: &mut Block, state: &CircState) {
         return;
     }
 
-    let parent = spanning_tree(&block.nodes, &block.edges);
+    // The ordering helpers below work in local indices (positions within the
+    // block's node list), so express the block's global edges locally first.
+    let local_index: HashMap<usize, usize> =
+        block.nodes.iter().copied().enumerate().collect();
+    let local_edges: Vec<(usize, usize)> = block
+        .edges
+        .iter()
+        .filter_map(|&(a, b)| Some((*local_index.get(&a)?, *local_index.get(&b)?)))
+        .collect();
+
+    let parent = spanning_tree(n, &local_edges);
     let mut path = longest_path_in_tree(&parent);
 
-    place_residual_nodes(&block.nodes, &block.edges, &mut path);
+    place_residual_nodes(n, &local_edges, &mut path);
 
-    reduce_crossings(&mut path, &block.edges);
+    reduce_crossings(&mut path, &local_edges);
 
     // Account for node sizes: radius = N * (min_dist + largest_node) / (2 * PI)
     let largest_node = 72.0; // default node size from the moar example (MIN_NODE_SIDE)
@@ -512,37 +542,41 @@ fn layout_block(block: &mut Block, state: &CircState) {
         circumference / TAU
     };
 
-    block.circle_list = path;
+    // Map the local ordering back to global node indices so that
+    // `collect_positions` can address the shared coordinate map without
+    // colliding across blocks.
+    block.circle_list = path.iter().map(|&local| block.nodes[local]).collect();
     block.radius = if n <= 1 { (state.min_dist + largest_node) / 2.0 } else { radius };
     block.rad0 = block.radius;
-    block.parent_pos = None;
+
+    // Angle at which this block's articulation point (shared with its parent
+    // block) sits on the circle, so the parent can rotate the block to line
+    // the shared node up.
+    let mut parent_pos = None;
+    if let Some(art) = block.child {
+        if let Some(pos) = path.iter().position(|&local| block.nodes[local] == art) {
+            parent_pos = Some(pos as f64 * TAU / n as f64);
+        }
+    }
+    block.parent_pos = parent_pos;
 }
 
 // ── Child block positioning ──────────────────────────────────────────────
 
+/// Rotation that lines the child's articulation node up with the parent's:
+/// the shared node must point from the child's center back towards the
+/// tangent point, i.e. along `theta + PI`.
 fn get_rotation(child: &Block, _x: f64, _y: f64, theta: f64) -> f64 {
-    if let Some(pp) = child.parent_pos {
-        let mut angle = theta + PI - pp;
-        if angle < 0.0 {
-            angle += TAU;
+    match child.parent_pos {
+        Some(pp) => {
+            let mut angle = theta + PI - pp;
+            if angle < 0.0 {
+                angle += TAU;
+            }
+            angle
         }
-        return angle;
+        None => 0.0,
     }
-
-    let count = child.circle_list.len();
-    if count == 2 {
-        return theta - PI / 2.0;
-    }
-
-    let _neighbor = match child.child {
-        Some(idx) => idx,
-        None => return 0.0,
-    };
-
-    0.0
-}
-
-fn apply_delta(_block: &mut Block, _x: f64, _y: f64, _rotate: f64) {
 }
 
 fn position_children(block: &mut Block, state: &CircState) {
@@ -563,38 +597,37 @@ fn position_children(block: &mut Block, state: &CircState) {
         }
     }
 
-    if parent_nodes.is_empty() {
-        let child_indices: Vec<usize> = (0..child_count).collect();
-        for &ci in &child_indices {
-            let child = &mut block.children[ci];
-            let angle = ci as f64 * TAU / child_count as f64;
-            let child_radius = child.radius;
-            let r = block.radius + child_radius + state.min_dist;
-            let dx = r * angle.cos();
-            let dy = r * angle.sin();
-            apply_delta(child, dx, dy, 0.0);
-        }
-        let max_child_r = block.children.iter().map(|c| c.radius).max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(0.0);
-        if child_count == 1 {
-            block.radius += state.min_dist / 2.0 + max_child_r;
-            block.coalesced = true;
-        } else {
-            block.radius += max_child_r;
-        }
-        return;
-    }
-
     let mut max_radius: f64 = 0.0;
+    let mut placed = vec![false; child_count];
     for &(path_idx, ci) in &parent_nodes {
         let child = &mut block.children[ci];
         let theta = path_idx as f64 * node_angle;
-        let child_radius = child.radius;
-        let r = block.radius + child_radius + state.min_dist;
+        // The child circle is tangent to this one at the shared articulation
+        // point, which sits on our own circle (`rad0`) at angle `theta`.
+        let r = block.rad0 + child.rad0;
         let dx = r * theta.cos();
         let dy = r * theta.sin();
         let rotate = get_rotation(child, dx, dy, theta);
-        apply_delta(child, dx, dy, rotate);
-        max_radius = max_radius.max(child_radius);
+        child.offset = (dx, dy);
+        child.rotation = rotate;
+        placed[ci] = true;
+        max_radius = max_radius.max(child.radius);
+    }
+
+    // Children whose articulation point is not on this block's circle would
+    // otherwise keep the default (0, 0) offset and stack on top of their
+    // parent. Spread them on a half-step grid over the full circle so they
+    // land between the anchored slots.
+    let unanchored: Vec<usize> = (0..child_count).filter(|&ci| !placed[ci]).collect();
+    for (k, &ci) in unanchored.iter().enumerate() {
+        let child = &mut block.children[ci];
+        let angle = TAU * (k as f64 + 0.5) / child_count as f64;
+        // No shared articulation point, so keep a minimum gap between the
+        // circles.
+        let r = block.rad0 + child.rad0 + state.min_dist;
+        child.offset = (r * angle.cos(), r * angle.sin());
+        child.rotation = 0.0;
+        max_radius = max_radius.max(child.radius);
     }
 
     if child_count == 1 {
@@ -615,48 +648,51 @@ fn do_block(block: &mut Block, state: &CircState) {
     position_children(block, state);
 }
 
+/// Places every node of `block` (and its subtree) into `coords`, which is
+/// keyed by global node index.
+///
+/// `(offset_x, offset_y)` is the parent block's center in global coordinates
+/// and `parent_rotation` is the parent's accumulated rotation. A block's own
+/// `offset`/`rotation` are expressed in the parent's frame, so they are
+/// rotated by `parent_rotation` before being applied.
 fn collect_positions(
     block: &Block,
     offset_x: f64,
     offset_y: f64,
-    rotation: f64,
+    parent_rotation: f64,
     coords: &mut std::collections::BTreeMap<usize, (f64, f64)>,
-    all_nodes: &[u32],
-    min_dist: f64,
 ) {
+    let cos_p = parent_rotation.cos();
+    let sin_p = parent_rotation.sin();
+
+    // This block's center in global coordinates.
+    let cx = offset_x + block.offset.0 * cos_p - block.offset.1 * sin_p;
+    let cy = offset_y + block.offset.0 * sin_p + block.offset.1 * cos_p;
+    let rotation = parent_rotation + block.rotation;
+
     let n = block.circle_list.len();
-    if n == 0 {
-        return;
-    }
+    if n > 0 {
+        let cos_r = rotation.cos();
+        let sin_r = rotation.sin();
 
-    let cos_r = rotation.cos();
-    let sin_r = rotation.sin();
+        // Nodes sit on the block's own circle (`rad0`); `radius` also
+        // accounts for child subtrees and must not push the nodes out of the
+        // positions their children were spaced against.
+        let radius = block.rad0;
+        for (i, &node) in block.circle_list.iter().enumerate() {
+            let theta = i as f64 * TAU / n as f64;
+            let local_x = radius * theta.cos();
+            let local_y = radius * theta.sin();
 
-    let radius = block.radius;
-    for (i, &node_local) in block.circle_list.iter().enumerate() {
-        let theta = i as f64 * TAU / n as f64;
-        let local_x = radius * theta.cos();
-        let local_y = radius * theta.sin();
+            let rx = local_x * cos_r - local_y * sin_r;
+            let ry = local_x * sin_r + local_y * cos_r;
 
-        let rx = local_x * cos_r - local_y * sin_r;
-        let ry = local_x * sin_r + local_y * cos_r;
-
-        let global_x = rx + offset_x;
-        let global_y = ry + offset_y;
-
-        coords.insert(node_local, (global_x, global_y));
+            coords.insert(node, (cx + rx, cy + ry));
+        }
     }
 
     for child in &block.children {
-        let child_radius: f64 = block.radius + child.radius + min_dist;
-        let child_theta: f64 = 0.0;
-        let child_x = child_radius * child_theta.cos();
-        let child_y = child_radius * child_theta.sin();
-
-        let cx = child_x * cos_r - child_y * sin_r + offset_x;
-        let cy = child_x * sin_r + child_y * cos_r + offset_y;
-
-        collect_positions(child, cx, cy, rotation, coords, all_nodes, min_dist);
+        collect_positions(child, cx, cy, rotation, coords);
     }
 }
 
@@ -702,7 +738,7 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
     do_block(&mut root, &state);
 
     let mut coords: std::collections::BTreeMap<usize, (f64, f64)> = std::collections::BTreeMap::new();
-    collect_positions(&root, 0.0, 0.0, 0.0, &mut coords, nodes, state.min_dist);
+    collect_positions(&root, 0.0, 0.0, 0.0, &mut coords);
 
     if coords.is_empty() {
         return GraphLayout::from_parts(0.0, 1.0, coords, Vec::new(), Vec::new());
@@ -741,8 +777,16 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
         .iter()
         .enumerate()
         .map(|(i, &(from, to))| {
-            let from_pos = coords.get(&(from as usize)).copied().unwrap_or((0.0, 0.0));
-            let to_pos = coords.get(&(to as usize)).copied().unwrap_or((0.0, 0.0));
+            let from_pos = node_index
+                .get(&from)
+                .and_then(|&index| coords.get(&index))
+                .copied()
+                .unwrap_or((0.0, 0.0));
+            let to_pos = node_index
+                .get(&to)
+                .and_then(|&index| coords.get(&index))
+                .copied()
+                .unwrap_or((0.0, 0.0));
             let points = vec![from_pos, to_pos];
             let label = (input.edge_label)(i, (from, to));
             rust_sugiyama::EdgeLayout::new(i, points.clone(), points, label, None)
@@ -778,6 +822,7 @@ mod tests {
         // centered at the origin, so raw coordinates span [-R, R] per axis.
         let nodes = vec![0, 1, 2, 3];
         let edges = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
+        let count = nodes.len();
         let layout = circo_layout(&circo_input(nodes, edges));
 
         // radius = n * (min_dist + largest_node) / TAU with min_dist = 120 and
@@ -792,10 +837,121 @@ mod tests {
 
         // All node centers must sit inside the reported box, in the positive
         // quadrant.
-        for position in 0..nodes.len() {
+        for position in 0..count {
             let (x, y) = layout.position(position).expect("node has a position");
             assert!(x >= -1e-9 && x <= layout.max_x() + 1e-9);
             assert!(y >= -1e-9 && y <= layout.max_y() + 1e-9);
         }
+    }
+}
+
+#[cfg(test)]
+mod multi_block_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn circo_input(nodes: Vec<u32>, edges: Vec<(u32, u32)>) -> LayoutInput<'static> {
+        let clusters: Arc<[crate::layout_engine::Cluster]> = Arc::from(Vec::new());
+        LayoutInput {
+            nodes: Arc::from(nodes),
+            edges: Arc::from(edges),
+            config: rust_sugiyama::Config::default(),
+            render_config: rust_sugiyama::RenderConfig::default(),
+            clusters,
+            node_size: Arc::new(|_| (100.0, 40.0)),
+            edge_label: Arc::new(|_, _| None),
+        }
+    }
+
+    /// Collects every node's position, panicking if any node is missing one.
+    fn all_positions(layout: &GraphLayout, count: usize) -> Vec<(f64, f64)> {
+        (0..count)
+            .map(|i| {
+                layout
+                    .position(i)
+                    .unwrap_or_else(|| panic!("node index {i} has no position"))
+            })
+            .collect()
+    }
+
+    fn assert_distinct(positions: &[(f64, f64)]) {
+        for i in 0..positions.len() {
+            for j in (i + 1)..positions.len() {
+                let dx = positions[i].0 - positions[j].0;
+                let dy = positions[i].1 - positions[j].1;
+                assert!(
+                    dx * dx + dy * dy > 1.0,
+                    "nodes {i} and {j} collide: {positions:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn path_graph_gives_every_node_a_distinct_position() {
+        // A path is three biconnected blocks chained by articulation points.
+        // Regression test for local/global index confusion: child blocks used
+        // to write their node positions over the root block's coordinates,
+        // leaving some nodes without any position at all.
+        let nodes = vec![0u32, 1, 2, 3];
+        let edges = vec![(0u32, 1), (1, 2), (2, 3)];
+        let count = nodes.len();
+        let layout = circo_layout(&circo_input(nodes, edges));
+
+        let positions = all_positions(&layout, count);
+        assert_distinct(&positions);
+    }
+
+    #[test]
+    fn longer_path_keeps_blocks_chained() {
+        // Five chained blocks: each articulation point must sit at the same
+        // global position in both of its blocks (tangent attachment), so no
+        // node may end up closer than the minimum distance.
+        let nodes = vec![0u32, 1, 2, 3, 4, 5];
+        let edges = vec![(0u32, 1), (1, 2), (2, 3), (3, 4), (4, 5)];
+        let count = nodes.len();
+        let layout = circo_layout(&circo_input(nodes, edges));
+
+        let positions = all_positions(&layout, count);
+        assert_distinct(&positions);
+    }
+
+    #[test]
+    fn cycle_is_a_single_block() {
+        // A 4-cycle is biconnected: every node lands on one circle.
+        let nodes = vec![0u32, 1, 2, 3];
+        let edges = vec![(0u32, 1), (1, 2), (2, 3), (3, 0)];
+        let count = nodes.len();
+        let layout = circo_layout(&circo_input(nodes, edges));
+
+        let positions = all_positions(&layout, count);
+        assert_distinct(&positions);
+    }
+
+    #[test]
+    fn butterfly_shares_its_central_articulation_point() {
+        // Two triangles glued at node 0: two blocks sharing one cutpoint.
+        let nodes = vec![0u32, 1, 2, 3, 4];
+        let edges = vec![(0u32, 1), (1, 2), (2, 0), (0, 3), (3, 4), (4, 0)];
+        let count = nodes.len();
+        let layout = circo_layout(&circo_input(nodes, edges));
+
+        let positions = all_positions(&layout, count);
+        assert_distinct(&positions);
+    }
+
+    #[test]
+    fn sibling_child_blocks_do_not_stack() {
+        // Node 0 is an articulation point with two child blocks ({0,1} and
+        // {0,2}). Regression test for `apply_delta` being a no-op: every
+        // child used to be placed at the same angle, stacking whole
+        // sub-blocks on top of each other.
+        let nodes = vec![0u32, 1, 2];
+        let edges = vec![(0u32, 1), (0, 2)];
+        let count = nodes.len();
+        let layout = circo_layout(&circo_input(nodes, edges));
+
+        let positions = all_positions(&layout, count);
+        assert_distinct(&positions);
     }
 }

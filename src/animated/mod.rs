@@ -422,11 +422,15 @@ impl<Message> From<GraphNodesEvent> for Event<Message> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AutoFit {
     Off,
-    Initial,
-    Ongoing,
+    /// Fit to view on the first layout pass.
+    /// The argument is the fraction of the viewport to occupy (1.0 = 100%).
+    Initial(f32),
+    /// Re-fit when the graph or viewport size changes.
+    /// The argument is the fraction of the viewport to occupy (1.0 = 100%).
+    Ongoing(f32),
 }
 
 impl Default for AutoFit {
@@ -1923,17 +1927,20 @@ where
                 .map(|previous| !almost_equal_f32(previous.height, size.height))
                 .unwrap_or(true);
         let fit_requested = self.viewport.take_fit_to_view_request();
-        let should_auto_fit = fit_requested
-            || match self.auto_fit {
-                AutoFit::Off => false,
-                AutoFit::Initial => !state.initial_fit_applied,
-                AutoFit::Ongoing => signature_changed || size_changed,
-            };
+        let (should_auto_fit, auto_fit_scale) = if fit_requested {
+            (true, 1.0)
+        } else {
+            match self.auto_fit {
+                AutoFit::Off => (false, 1.0),
+                AutoFit::Initial(scale) => (!state.initial_fit_applied, scale),
+                AutoFit::Ongoing(scale) => (signature_changed || size_changed, scale),
+            }
+        };
         let should_auto_center =
             !should_auto_fit && self.keep_centered && (signature_changed || size_changed);
 
         if should_auto_fit {
-            let zoom = fit_zoom(&self.sugiyama, size);
+            let zoom = fit_zoom(&self.sugiyama, size, auto_fit_scale);
             let pan = centered_pan(&self.sugiyama, size, zoom);
             self.viewport.apply_view(pan, zoom);
             state.initial_fit_applied = true;
@@ -2970,12 +2977,12 @@ fn layout_offset(sugiyama: &GraphLayout, size: iced::Size) -> Vector {
     }
 }
 
-fn fit_zoom(sugiyama: &GraphLayout, size: iced::Size) -> f32 {
+fn fit_zoom(sugiyama: &GraphLayout, size: iced::Size, scale: f32) -> f32 {
     let graph_width = (sugiyama.max_x() as f32).max(1.0);
     let graph_height = (sugiyama.max_y() as f32).max(1.0);
     let zoom_x = size.width.max(1.0) / graph_width;
     let zoom_y = size.height.max(1.0) / graph_height;
-    zoom_x.min(zoom_y).clamp(MIN_ZOOM, MAX_ZOOM)
+    (zoom_x.min(zoom_y) * scale).clamp(MIN_ZOOM, MAX_ZOOM)
 }
 
 fn centered_pan(sugiyama: &GraphLayout, size: iced::Size, zoom: f32) -> Vector {

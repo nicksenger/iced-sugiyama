@@ -678,7 +678,7 @@ impl Moarificator {
                 sugiyama.animation_duration(animation_duration)
             };
 
-            graph.auto_fit(iced_sugiyama::AutoFit::Initial)
+            graph.auto_fit(iced_sugiyama::AutoFit::Initial(1.0))
         })
         .width(Length::Fill)
         .height(Length::Fill);

@@ -139,7 +139,9 @@ impl BlockFinder {
         let mut block_edges: Vec<(usize, usize)> = Vec::new();
 
         loop {
-            let Some((a, b)) = self.edge_stack.pop() else { break };
+            let Some((a, b)) = self.edge_stack.pop() else {
+                break;
+            };
             block_edges.push((a, b));
 
             for &node in &[a, b] {
@@ -249,7 +251,12 @@ fn build_block_tree(adj: &[Vec<usize>]) -> Option<Block> {
         }
     }
 
-    fn build_subtree(idx: usize, blocks: &[Block], children: &HashMap<usize, Vec<usize>>, child_node: &[Option<usize>]) -> Block {
+    fn build_subtree(
+        idx: usize,
+        blocks: &[Block],
+        children: &HashMap<usize, Vec<usize>>,
+        child_node: &[Option<usize>],
+    ) -> Block {
         let mut block = blocks[idx].clone();
         let child_indices = children.get(&idx).cloned().unwrap_or_default();
         for &child_idx in &child_indices {
@@ -260,7 +267,12 @@ fn build_block_tree(adj: &[Vec<usize>]) -> Option<Block> {
         block
     }
 
-    Some(build_subtree(root_block, &blocks, &children_map, &block_child_node))
+    Some(build_subtree(
+        root_block,
+        &blocks,
+        &children_map,
+        &block_child_node,
+    ))
 }
 
 // ── Spanning tree and longest path ───────────────────────────────────────
@@ -335,7 +347,13 @@ fn longest_path_in_tree(parent: &[Option<usize>]) -> Vec<usize> {
 
     let (endpoint, _) = dfs_farthest(root, &children);
 
-    fn dfs_path(u: usize, target: usize, children: &[Vec<usize>], visited: &mut [bool], path: &mut Vec<usize>) -> bool {
+    fn dfs_path(
+        u: usize,
+        target: usize,
+        children: &[Vec<usize>],
+        visited: &mut [bool],
+        path: &mut Vec<usize>,
+    ) -> bool {
         if u == target {
             path.push(u);
             return true;
@@ -433,7 +451,12 @@ fn count_crossings(list: &[usize], sub_edges: &[(usize, usize)]) -> usize {
         return 0;
     }
 
-    let pos: HashMap<usize, usize> = list.iter().copied().enumerate().map(|(i, n)| (n, i)).collect();
+    let pos: HashMap<usize, usize> = list
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, n)| (n, i))
+        .collect();
 
     for i in 0..sub_edges.len() {
         let (a1, b1) = sub_edges[i];
@@ -518,8 +541,7 @@ fn layout_block(block: &mut Block, state: &CircState) {
 
     // The ordering helpers below work in local indices (positions within the
     // block's node list), so express the block's global edges locally first.
-    let local_index: HashMap<usize, usize> =
-        block.nodes.iter().copied().enumerate().collect();
+    let local_index: HashMap<usize, usize> = block.nodes.iter().copied().enumerate().collect();
     let local_edges: Vec<(usize, usize)> = block
         .edges
         .iter()
@@ -546,7 +568,11 @@ fn layout_block(block: &mut Block, state: &CircState) {
     // `collect_positions` can address the shared coordinate map without
     // colliding across blocks.
     block.circle_list = path.iter().map(|&local| block.nodes[local]).collect();
-    block.radius = if n <= 1 { (state.min_dist + largest_node) / 2.0 } else { radius };
+    block.radius = if n <= 1 {
+        (state.min_dist + largest_node) / 2.0
+    } else {
+        radius
+    };
     block.rad0 = block.radius;
 
     // Angle at which this block's articulation point (shared with its parent
@@ -586,7 +612,11 @@ fn position_children(block: &mut Block, state: &CircState) {
     }
 
     let length = block.circle_list.len();
-    let node_angle = if length > 0 { TAU / (length as f64) } else { TAU / child_count as f64 };
+    let node_angle = if length > 0 {
+        TAU / (length as f64)
+    } else {
+        TAU / child_count as f64
+    };
 
     let mut parent_nodes: Vec<(usize, usize)> = Vec::new();
     for (ci, child) in block.children.iter().enumerate() {
@@ -709,13 +739,24 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
     let edges: &[(u32, u32)] = &input.edges;
 
     if nodes.is_empty() {
-        return GraphLayout::from_parts(0.0, 1.0, std::collections::BTreeMap::new(), Vec::new(), Vec::new());
+        return GraphLayout::from_parts(
+            0.0,
+            1.0,
+            std::collections::BTreeMap::new(),
+            Vec::new(),
+            Vec::new(),
+        );
     }
 
     let node_count = nodes.len();
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); node_count];
 
-    let node_index: HashMap<u32, usize> = nodes.iter().copied().enumerate().map(|(i, n)| (n, i)).collect();
+    let node_index: HashMap<u32, usize> = nodes
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, n)| (n, i))
+        .collect();
 
     for &(from, to) in edges {
         if let Some(&fi) = node_index.get(&from) {
@@ -731,13 +772,20 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
     let mut root = match build_block_tree(&adj) {
         Some(r) => r,
         None => {
-            return GraphLayout::from_parts(0.0, 1.0, std::collections::BTreeMap::new(), Vec::new(), Vec::new());
+            return GraphLayout::from_parts(
+                0.0,
+                1.0,
+                std::collections::BTreeMap::new(),
+                Vec::new(),
+                Vec::new(),
+            );
         }
     };
 
     do_block(&mut root, &state);
 
-    let mut coords: std::collections::BTreeMap<usize, (f64, f64)> = std::collections::BTreeMap::new();
+    let mut coords: std::collections::BTreeMap<usize, (f64, f64)> =
+        std::collections::BTreeMap::new();
     collect_positions(&root, 0.0, 0.0, 0.0, &mut coords);
 
     if coords.is_empty() {
@@ -789,13 +837,19 @@ pub fn circo_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
                 .unwrap_or((0.0, 0.0));
             let points = vec![from_pos, to_pos];
             let label = (input.edge_label)(i, (from, to));
-            rust_sugiyama::EdgeLayout::new(i, points.clone(), points, label, None)
+            iced_sugiyama_core::EdgeLayout::new(i, points.clone(), points, label, None)
         })
         .collect();
 
     let cluster_layouts = Vec::new();
 
-    GraphLayout::from_parts(layout_width, layout_height, coords, edge_layouts, cluster_layouts)
+    GraphLayout::from_parts(
+        layout_width,
+        layout_height,
+        coords,
+        edge_layouts,
+        cluster_layouts,
+    )
 }
 
 #[cfg(test)]
@@ -808,8 +862,8 @@ mod tests {
         LayoutInput {
             nodes: Arc::from(nodes),
             edges: Arc::from(edges),
-            config: rust_sugiyama::Config::default(),
-            render_config: rust_sugiyama::RenderConfig::default(),
+            config: iced_sugiyama_core::Config::default(),
+            render_config: iced_sugiyama_core::RenderConfig::default(),
             clusters,
             node_size: Arc::new(|_| (100.0, 40.0)),
             edge_label: Arc::new(|_, _| None),
@@ -855,8 +909,8 @@ mod multi_block_tests {
         LayoutInput {
             nodes: Arc::from(nodes),
             edges: Arc::from(edges),
-            config: rust_sugiyama::Config::default(),
-            render_config: rust_sugiyama::RenderConfig::default(),
+            config: iced_sugiyama_core::Config::default(),
+            render_config: iced_sugiyama_core::RenderConfig::default(),
             clusters,
             node_size: Arc::new(|_| (100.0, 40.0)),
             edge_label: Arc::new(|_, _| None),
@@ -968,4 +1022,3 @@ mod multi_block_tests {
         assert_distinct(&positions);
     }
 }
-

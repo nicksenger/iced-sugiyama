@@ -9,9 +9,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::layout_engine::{Cluster, GraphLayout, LayoutInput};
-use rust_sugiyama::{
-    ClusterLayout, Config, CrossingMinimization, EdgeLayout, RankingType, RenderConfig,
-};
+use crate::{ClusterLayout, Config, CrossingMinimization, EdgeLayout, RankingType, RenderConfig};
 
 const DEFAULT_NODE_SIZE: (f64, f64) = (56.0, 32.0);
 

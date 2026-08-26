@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-pub use rust_sugiyama::{ClusterLayout, EdgeLayout, GraphLayout};
+pub use iced_sugiyama_core::{ClusterLayout, EdgeLayout, GraphLayout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeEndpointKind {
@@ -63,9 +63,9 @@ pub struct LayoutInput<'a> {
     /// Edges as (source, destination) pairs.
     pub edges: Arc<[(u32, u32)]>,
     /// Sugiyama algorithm configuration.
-    pub config: rust_sugiyama::Config,
+    pub config: iced_sugiyama_core::Config,
     /// Render configuration (routing, clustering, etc.).
-    pub render_config: rust_sugiyama::RenderConfig,
+    pub render_config: iced_sugiyama_core::RenderConfig,
     /// Cluster definitions.
     pub clusters: Arc<[Cluster]>,
     /// Closure that returns the size of a node.
@@ -97,11 +97,11 @@ pub fn default_layout<'a>(input: &LayoutInput<'a>) -> GraphLayout {
     input.compute()
 }
 
-fn core_clusters(clusters: &[Cluster]) -> Vec<rust_sugiyama::Cluster> {
+fn core_clusters(clusters: &[Cluster]) -> Vec<iced_sugiyama_core::Cluster> {
     clusters
         .iter()
         .map(|cluster| {
-            let mut converted = rust_sugiyama::Cluster::new(cluster.nodes.clone());
+            let mut converted = iced_sugiyama_core::Cluster::new(cluster.nodes.clone());
             if let Some(padding) = cluster.padding {
                 converted = converted.padding(padding);
             }
@@ -116,14 +116,14 @@ fn core_clusters(clusters: &[Cluster]) -> Vec<rust_sugiyama::Cluster> {
 pub(crate) fn compute_layout(
     nodes: &[u32],
     edges: &[(u32, u32)],
-    config: &rust_sugiyama::Config,
+    config: &iced_sugiyama_core::Config,
     node_size: impl Fn(u32) -> (f64, f64),
     edge_label: impl Fn(usize, (u32, u32)) -> Option<String>,
     clusters: &[Cluster],
-    render_config: &rust_sugiyama::RenderConfig,
+    render_config: &iced_sugiyama_core::RenderConfig,
 ) -> GraphLayout {
     let clusters = core_clusters(clusters);
-    rust_sugiyama::layout_graph(
+    iced_sugiyama_core::layout_graph(
         nodes,
         edges,
         config,
@@ -150,12 +150,12 @@ pub(crate) fn layout_signature(nodes: &[u32], edges: &[(u32, u32)], clusters: &[
 pub fn graphviz_plain_layout<NodeSize, NodeLabel, EdgeLabel, ClusterLabel>(
     nodes: &[u32],
     edges: &[(u32, u32)],
-    config: &rust_sugiyama::Config,
+    config: &iced_sugiyama_core::Config,
     node_size: NodeSize,
     node_label: NodeLabel,
     edge_label: EdgeLabel,
     clusters: &[Cluster],
-    render_config: &rust_sugiyama::RenderConfig,
+    render_config: &iced_sugiyama_core::RenderConfig,
     cluster_label: ClusterLabel,
 ) -> String
 where

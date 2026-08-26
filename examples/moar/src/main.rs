@@ -796,7 +796,7 @@ fn initial_graph(seed: u64, node_count: u32) -> Graph {
     Graph {
         nodes,
         edges,
-        config: rust_sugiyama::Config {
+        config: iced_sugiyama_core::Config {
             vertex_spacing: 26.0,
             ..Default::default()
         },
@@ -1938,8 +1938,8 @@ fn edge_label(index: usize, (from, to): (u32, u32)) -> Option<String> {
     Some(format!("{from} -> {to}"))
 }
 
-fn render_config() -> rust_sugiyama::RenderConfig {
-    rust_sugiyama::RenderConfig {
+fn render_config() -> iced_sugiyama_core::RenderConfig {
+    iced_sugiyama_core::RenderConfig {
         routing_padding: 4.0,
         bend_penalty: 6.0,
         cluster_padding: 10.0,

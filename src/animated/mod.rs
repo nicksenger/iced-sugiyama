@@ -362,7 +362,7 @@ impl Animation {
 pub struct Graph {
     pub nodes: Vec<u32>,
     pub edges: Vec<(u32, u32)>,
-    pub config: rust_sugiyama::Config,
+    pub config: iced_sugiyama_core::Config,
 }
 
 impl<'a> From<&'a Graph> for Cow<'a, Graph> {
@@ -383,11 +383,11 @@ impl Graph {
         Self {
             nodes,
             edges,
-            config: rust_sugiyama::Config::default(),
+            config: iced_sugiyama_core::Config::default(),
         }
     }
 
-    pub fn config(self, config: rust_sugiyama::Config) -> Self {
+    pub fn config(self, config: iced_sugiyama_core::Config) -> Self {
         Self { config, ..self }
     }
 }
@@ -568,7 +568,7 @@ pub struct Sugiyama<'a, Message, Theme, Renderer> {
     node_size: Arc<dyn Fn(u32) -> (f64, f64) + 'a>,
     measure_node_sizes: bool,
     clusters: Vec<Cluster>,
-    render_config: rust_sugiyama::RenderConfig,
+    render_config: iced_sugiyama_core::RenderConfig,
     cluster_color: fn(usize) -> Color,
     label_color: fn(usize) -> Color,
     padding: Padding,
@@ -731,7 +731,7 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
         self.cluster_container(f)
     }
 
-    pub fn render_config(mut self, config: rust_sugiyama::RenderConfig) -> Self {
+    pub fn render_config(mut self, config: iced_sugiyama_core::RenderConfig) -> Self {
         self.render_config = config;
         self
     }

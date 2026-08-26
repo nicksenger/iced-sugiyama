@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 iced.workspace = true
 lyon_algorithms.workspace = true
-rust_sugiyama.workspace = true
+iced-sugiyama-core.workspace = true
 petgraph = "0.8"
 
 [dev-dependencies]
@@ -36,5 +36,5 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 iced = { version = "0.14", features = ["advanced", "canvas", "lazy"] }
-rust_sugiyama = { package = "iced-sugiyama-core", path = "./core" }
+iced-sugiyama-core = { package = "iced-sugiyama-core", path = "./core" }
 lyon_algorithms = "1"

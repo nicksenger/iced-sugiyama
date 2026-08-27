@@ -780,6 +780,71 @@ impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer> {
     }
 }
 
+impl<'a, Message, Theme, Renderer> Sugiyama<'a, Message, Theme, Renderer>
+where
+    Renderer: iced::advanced::Renderer + iced::advanced::graphics::geometry::Renderer + 'static,
+    Theme: 'static,
+    Message: Clone + 'static,
+{
+    /// Rebuilds the layout for the current graph and primes a new animation
+    /// transition if (and only if) the displayed layout is about to change.
+    ///
+    /// Style-only updates (e.g. hover highlighting) must apply in the same
+    /// frame; crossfading them would make the highlight lag behind the cursor
+    /// and appear to trigger on mouse-leave instead of mouse-enter.
+    ///
+    /// Measured node sizes only enter the layout signature after a layout
+    /// pass, so expand/contract changes surface through
+    /// `Event::NodeSizesChanged`; running this from that event as well is
+    /// what starts their transitions.
+    fn refresh_layout(&self, state: &mut SugiyamaState) {
+        state.switch_state.flip();
+        let measured_node_sizes = self
+            .measure_node_sizes
+            .then(|| state.measured_node_sizes.clone());
+        let node_size = measured_node_size(Arc::clone(&self.node_size), measured_node_sizes.clone());
+        let signature = signature_with_node_sizes(
+            crate::layout_engine::layout_signature(
+                &self.graph.nodes,
+                &self.graph.edges,
+                &self.clusters,
+            ),
+            measured_node_sizes.as_ref(),
+        );
+        {
+            let mut memo = state.layout_memo.borrow_mut();
+            let _ = memo.layout_for(signature, || {
+                (self.layout_fn)(&LayoutInput {
+                    nodes: Arc::from(self.graph.nodes.as_slice()),
+                    edges: Arc::from(self.graph.edges.as_slice()),
+                    config: self.graph.config,
+                    render_config: self.render_config,
+                    clusters: Arc::from(self.clusters.as_slice()),
+                    node_size,
+                    edge_label: Arc::clone(&self.edge_label),
+                })
+            });
+        }
+        if state.displayed_signature != Some(signature) {
+            // The currently displayed layout becomes the "old" endpoint of
+            // the new transition; `view` looks it up via
+            // `previous_signature`.
+            state.previous_signature = state.displayed_signature;
+            state.displayed_signature = Some(signature);
+            state.animation = SharedAnimation::default();
+        }
+        state.previous_edge_style_by_index = Some(snapshot_edge_styles(
+            &self.graph.edges,
+            self.outgoing_edge_style.as_ref(),
+        ));
+        state.previous_edge_color_by_index = Some(snapshot_edge_colors(
+            &self.graph.edges,
+            self.edge_color.as_ref(),
+        ));
+        state.previous_graph = Some(self.graph.clone().into_owned());
+    }
+}
+
 impl<Message, Theme, Renderer> Component<Message, Theme, Renderer>
     for Sugiyama<'_, Message, Theme, Renderer>
 where
@@ -817,7 +882,9 @@ where
             move |(
                 graph,
                 old,
-                switch_state,
+                // Only part of the key: a flip forces this closure to re-run
+                // so edges and children pick up fresh styles.
+                _switch_state,
                 animation,
                 viewport,
                 _refresh_nonce,
@@ -1016,9 +1083,7 @@ where
                     measured_node_sizes: measured_node_sizes.clone(),
                 };
 
-                Switch::new(
-                    *switch_state,
-                    Stack::with_children(vec![
+                Switch::new(Stack::with_children(vec![
                         iced::widget::canvas(GraphCanvas::<Renderer> {
                             cache: Default::default(),
                             sugiyama: sugiyama.clone(),
@@ -1051,11 +1116,6 @@ where
     }
 
     fn update(&mut self, state: &mut Self::State, event: Self::Event) -> Option<Message> {
-        if matches!(&event, Event::NodeSizesChanged) {
-            state.refresh_nonce = state.refresh_nonce.saturating_add(1);
-            return None;
-        }
-
         if let Event::Viewport(interaction) = event {
             return self
                 .on_viewport_interaction
@@ -1063,44 +1123,11 @@ where
                 .map(|handler| handler(interaction));
         }
 
-        state.switch_state.flip();
-        let measured_node_sizes = self
-            .measure_node_sizes
-            .then(|| state.measured_node_sizes.clone());
-        let node_size = measured_node_size(Arc::clone(&self.node_size), measured_node_sizes.clone());
-        let signature = signature_with_node_sizes(
-            crate::layout_engine::layout_signature(
-                &self.graph.nodes,
-                &self.graph.edges,
-                &self.clusters,
-            ),
-            measured_node_sizes.as_ref(),
-        );
-        {
-            let mut memo = state.layout_memo.borrow_mut();
-            let _ = memo.layout_for(signature, || {
-                (self.layout_fn)(&LayoutInput {
-                    nodes: Arc::from(self.graph.nodes.as_slice()),
-                    edges: Arc::from(self.graph.edges.as_slice()),
-                    config: self.graph.config,
-                    render_config: self.render_config,
-                    clusters: Arc::from(self.clusters.as_slice()),
-                    node_size,
-                    edge_label: Arc::clone(&self.edge_label),
-                })
-            });
+        if matches!(&event, Event::NodeSizesChanged) {
+            state.refresh_nonce = state.refresh_nonce.saturating_add(1);
         }
-        state.previous_edge_style_by_index = Some(snapshot_edge_styles(
-            &self.graph.edges,
-            self.outgoing_edge_style.as_ref(),
-        ));
-        state.previous_edge_color_by_index = Some(snapshot_edge_colors(
-            &self.graph.edges,
-            self.edge_color.as_ref(),
-        ));
-        state.previous_graph = Some(self.graph.clone().into_owned());
-        state.previous_signature = Some(signature);
-        state.animation = SharedAnimation::default();
+
+        self.refresh_layout(state);
 
         match event {
             Event::Noop => None,
@@ -1120,45 +1147,7 @@ where
         operation.custom(self.id.as_ref(), bounds, &mut invalidate_request);
 
         if invalidate_request.requested {
-            state.switch_state.flip();
-            let measured_node_sizes = self
-                .measure_node_sizes
-                .then(|| state.measured_node_sizes.clone());
-            let node_size =
-                measured_node_size(Arc::clone(&self.node_size), measured_node_sizes.clone());
-            let signature = signature_with_node_sizes(
-                crate::layout_engine::layout_signature(
-                    &self.graph.nodes,
-                    &self.graph.edges,
-                    &self.clusters,
-                ),
-                measured_node_sizes.as_ref(),
-            );
-            {
-                let mut memo = state.layout_memo.borrow_mut();
-                let _ = memo.layout_for(signature, || {
-                    (self.layout_fn)(&LayoutInput {
-                        nodes: Arc::from(self.graph.nodes.as_slice()),
-                        edges: Arc::from(self.graph.edges.as_slice()),
-                        config: self.graph.config,
-                        render_config: self.render_config,
-                        clusters: Arc::from(self.clusters.as_slice()),
-                        node_size,
-                        edge_label: Arc::clone(&self.edge_label),
-                    })
-                });
-            }
-            state.previous_edge_style_by_index = Some(snapshot_edge_styles(
-                &self.graph.edges,
-                self.outgoing_edge_style.as_ref(),
-            ));
-            state.previous_edge_color_by_index = Some(snapshot_edge_colors(
-                &self.graph.edges,
-                self.edge_color.as_ref(),
-            ));
-            state.previous_graph = Some(self.graph.clone().into_owned());
-            state.previous_signature = Some(signature);
-            state.animation = SharedAnimation::default();
+            self.refresh_layout(state);
             state.refresh_nonce = state.refresh_nonce.saturating_add(1);
         }
 
@@ -1178,7 +1167,13 @@ where
 pub struct SugiyamaState {
     switch_state: switch::State,
     previous_graph: Option<Graph>,
+    /// Signature of the layout used as the "old" endpoint of the current
+    /// animation transition (looked up in `layout_memo` by `view`).
     previous_signature: Option<u64>,
+    /// Signature of the layout currently displayed on screen; compared
+    /// against freshly computed signatures to detect when a new transition
+    /// must start.
+    displayed_signature: Option<u64>,
     previous_edge_style_by_index: Option<HashMap<usize, OutgoingEdgeStyle>>,
     previous_edge_color_by_index: Option<HashMap<usize, (Color, Color)>>,
     animation: SharedAnimation,
@@ -1906,6 +1901,12 @@ where
     }
 
     fn diff(&self, tree: &mut Tree) {
+        let state = tree.state.downcast_mut::<GraphNodesState>();
+        // The component swaps in a fresh shared animation when a new
+        // transition starts; keep the tree's copy in sync so the overlay and
+        // the canvas animate together now that the subtree is no longer reset
+        // on each flip.
+        state.animation = self.animation.clone();
         tree.diff_children(&self.children)
     }
 
@@ -4415,5 +4416,110 @@ mod tests {
         assert_eq!(measured.get(7), Some((132.0, 48.0)));
         assert_eq!(measured.revision(), 2);
         assert!(measured.take_dirty());
+    }
+
+    fn animation_ptr(animation: &SharedAnimation) -> *const RefCell<Animation> {
+        Rc::as_ptr(&animation.0)
+    }
+
+    #[test]
+    fn style_only_updates_do_not_restart_the_transition() {
+        let hovered = Rc::new(std::cell::Cell::new(false));
+        let edge_color_state = hovered.clone();
+
+        let graph = Graph::new(vec![0u32, 1], vec![(0, 1)]);
+        let sugiyama: Sugiyama<(), iced::Theme, iced::Renderer> =
+            Sugiyama::new(&graph, |_node| iced::widget::text("node").into())
+                .measure_node_sizes(true)
+                .edge_color(move |_ctx| {
+                    if edge_color_state.get() {
+                        (Color::WHITE, Color::WHITE)
+                    } else {
+                        (Color::BLACK, Color::BLACK)
+                    }
+                });
+
+        let mut state = SugiyamaState::default();
+        state.measured_node_sizes.record(
+            &[0, 1],
+            &[Size::new(120.0, 200.0), Size::new(120.0, 40.0)],
+        );
+        sugiyama.refresh_layout(&mut state);
+        let settled = state.displayed_signature;
+        assert!(settled.is_some());
+        state.animation.set(Animation::Complete);
+        let settled_animation = state.animation.clone();
+
+        // A hover changes only edge styles; the in-flight/settled transition
+        // must not be restarted (that would crossfade the highlight).
+        hovered.set(true);
+        sugiyama.refresh_layout(&mut state);
+
+        assert_eq!(state.displayed_signature, settled);
+        assert_eq!(
+            animation_ptr(&settled_animation),
+            animation_ptr(&state.animation)
+        );
+    }
+
+    #[test]
+    fn measured_size_changes_start_a_transition_from_the_displayed_layout() {
+        let collapsed = Rc::new(std::cell::Cell::new(false));
+        let node_size_state = collapsed.clone();
+
+        let graph = Graph::new(vec![0u32, 1], vec![(0, 1)]);
+        let sugiyama: Sugiyama<(), iced::Theme, iced::Renderer> =
+            Sugiyama::new(&graph, |_node| iced::widget::text("node").into())
+                .measure_node_sizes(true)
+                .node_size(move |node| {
+                    if node == 0 && node_size_state.get() {
+                        (120.0, 40.0)
+                    } else {
+                        (120.0, 200.0)
+                    }
+                });
+
+        let mut state = SugiyamaState::default();
+        state.measured_node_sizes.record(
+            &[0, 1],
+            &[Size::new(120.0, 200.0), Size::new(120.0, 40.0)],
+        );
+        sugiyama.refresh_layout(&mut state);
+        let displayed = state.displayed_signature;
+        assert!(displayed.is_some());
+        state.animation.set(Animation::Complete);
+        let settled_animation = state.animation.clone();
+
+        // The user toggles node 0. At message time the measured sizes (and
+        // thus the signature) have not changed yet, so no transition starts.
+        collapsed.set(true);
+        sugiyama.refresh_layout(&mut state);
+        assert_eq!(
+            animation_ptr(&settled_animation),
+            animation_ptr(&state.animation)
+        );
+
+        // The layout pass then records the smaller measured size and reports
+        // NodeSizesChanged; that is when the new transition must start, with
+        // the displayed layout as its "old" endpoint.
+        state.measured_node_sizes.record(
+            &[0, 1],
+            &[Size::new(120.0, 40.0), Size::new(120.0, 40.0)],
+        );
+        sugiyama.refresh_layout(&mut state);
+
+        assert_ne!(
+            animation_ptr(&settled_animation),
+            animation_ptr(&state.animation)
+        );
+        assert_eq!(state.animation.get(), Animation::Pending);
+        assert_eq!(state.previous_signature, displayed);
+        assert_ne!(state.displayed_signature, displayed);
+
+        // Both layouts must be available for interpolation.
+        let memo = state.layout_memo.borrow();
+        let old_layout = memo.get_layout(displayed.unwrap()).unwrap();
+        let new_layout = memo.get_layout(state.displayed_signature.unwrap()).unwrap();
+        assert_ne!(old_layout.position(0), new_layout.position(0));
     }
 }

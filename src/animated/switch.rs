@@ -5,9 +5,6 @@ use iced::advanced::{Clipboard, Layout, Shell, Widget, renderer};
 use iced::mouse::Cursor;
 use iced::{Element, Length, Rectangle, Vector, mouse};
 
-struct A;
-struct B;
-
 #[derive(Clone, Copy, Debug, Default, Hash)]
 pub struct State(bool);
 
@@ -18,14 +15,12 @@ impl State {
 }
 
 pub struct Switch<'a, Message, Theme, Renderer> {
-    state: State,
     content: Element<'a, Message, Theme, Renderer>,
 }
 
 impl<'a, Message, Theme, Renderer> Switch<'a, Message, Theme, Renderer> {
-    pub fn new(state: State, content: impl Into<Element<'a, Message, Theme, Renderer>>) -> Self {
+    pub fn new(content: impl Into<Element<'a, Message, Theme, Renderer>>) -> Self {
         Self {
-            state,
             content: content.into(),
         }
     }
@@ -37,12 +32,12 @@ where
     Message: Clone,
     Renderer: iced::advanced::Renderer,
 {
+    // The tag must stay stable across flips: a changing tag makes iced
+    // discard the subtree's state (e.g. auto-fit bookkeeping) on every
+    // refresh. The flip only needs to change the `Lazy` key above us.
     fn tag(&self) -> tree::Tag {
-        if self.state.0 {
-            tree::Tag::of::<A>()
-        } else {
-            tree::Tag::of::<B>()
-        }
+        struct Tag;
+        tree::Tag::of::<Tag>()
     }
 
     fn state(&self) -> tree::State {
